@@ -31,6 +31,7 @@ STYLE_LABELS = {
 }
 DEFAULT_FRAME_COUNT = 10
 FRAME_OPTIONS = [5, 8, 10, 12, 16]
+MIN_VIDEO_SECONDS = 30
 MAX_VIDEO_SECONDS = 120
 
 
@@ -134,14 +135,16 @@ def format_duration(seconds: float) -> str:
     return f"{minutes}:{remaining:02d}"
 
 
-def split_assets_by_duration(assets: list[VideoAsset]) -> tuple[list[VideoAsset], list[tuple[VideoAsset, float]]]:
+def split_assets_by_duration(assets: list[VideoAsset]) -> tuple[list[VideoAsset], list[tuple[VideoAsset, float, str]]]:
     accepted: list[VideoAsset] = []
-    skipped: list[tuple[VideoAsset, float]] = []
+    skipped: list[tuple[VideoAsset, float, str]] = []
 
     for asset in assets:
         duration = probe_duration_seconds(asset.path)
-        if duration is not None and duration > MAX_VIDEO_SECONDS:
-            skipped.append((asset, duration))
+        if duration is not None and duration < MIN_VIDEO_SECONDS:
+            skipped.append((asset, duration, "too short"))
+        elif duration is not None and duration > MAX_VIDEO_SECONDS:
+            skipped.append((asset, duration, "too long"))
         else:
             accepted.append(asset)
 
@@ -282,7 +285,7 @@ def main() -> None:
 
         st.metric("Model", compact_model_name(model))
         st.metric("Frames", max_frames)
-        st.metric("Max length", format_duration(MAX_VIDEO_SECONDS))
+        st.metric("Length", f"{format_duration(MIN_VIDEO_SECONDS)}-{format_duration(MAX_VIDEO_SECONDS)}")
         st.metric("Sampling", "Smart")
         st.metric("Checks", "On" if run_checks else "Off")
         st.caption("Proxy connected" if proxy_url and backend == "Proxy" else "Direct API" if backend == "Direct Fireworks" else "Dry run")
@@ -348,13 +351,19 @@ def main() -> None:
         assets, skipped_assets = split_assets_by_duration(assets)
         if skipped_assets:
             skipped = ", ".join(
-                f"{asset.path.name} ({format_duration(duration)})"
-                for asset, duration in skipped_assets
+                f"{asset.path.name} ({format_duration(duration)}, {reason})"
+                for asset, duration, reason in skipped_assets
             )
-            st.warning(f"Skipped videos longer than {format_duration(MAX_VIDEO_SECONDS)}: {skipped}")
+            st.warning(
+                f"Skipped videos outside {format_duration(MIN_VIDEO_SECONDS)}-"
+                f"{format_duration(MAX_VIDEO_SECONDS)}: {skipped}"
+            )
 
         if not assets:
-            st.warning(f"No videos under {format_duration(MAX_VIDEO_SECONDS)} to process.")
+            st.warning(
+                f"No videos between {format_duration(MIN_VIDEO_SECONDS)} and "
+                f"{format_duration(MAX_VIDEO_SECONDS)} to process."
+            )
             return
 
         if not dry_run and backend == "Direct Fireworks" and not api_key:
