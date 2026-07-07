@@ -8,6 +8,8 @@ __pycache__/
 .env
 data/
 outputs/
-firebase_proxy/
+sample_output/
+docker_sample_output/
+docker_pushed_output/
 cloudflare_proxy/
 streamlit.*.log

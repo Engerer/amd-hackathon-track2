@@ -1,6 +1,6 @@
 # Cloudflare Fireworks Proxy
 
-Use this when Firebase Functions is blocked by the Blaze plan requirement.
+Cloudflare Worker proxy for Track 2 inference. This keeps the Fireworks API key out of the public Docker image.
 
 Flow:
 
@@ -47,7 +47,7 @@ npx wrangler deploy
 ```text
 MODEL_PROXY_URL=https://track2-fireworks-proxy.<your-subdomain>.workers.dev
 FIREWORKS_API_KEY=
-FIREWORKS_MODEL=accounts/fireworks/models/gemma-4-26b-a4b-it
+FIREWORKS_MODEL=accounts/fireworks/models/kimi-k2p6
 ```
 
 ## Optional Proxy Token

@@ -6,10 +6,6 @@ __pycache__/
 .mypy_cache/
 streamlit.*.log
 docker-info-check.log
-firebase_proxy/functions/node_modules/
-firebase_proxy/.firebaserc
-firebase_proxy/firebase-debug.log
-firebase_proxy/firebase-debug.*.log
 cloudflare_proxy/node_modules/
 cloudflare_proxy/.wrangler/
 
