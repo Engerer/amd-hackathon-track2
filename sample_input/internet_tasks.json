@@ -1,0 +1,42 @@
+[
+  {
+    "task_id": "web_traffic_city",
+    "video_url": "https://upload.wikimedia.org/wikipedia/commons/7/70/Street_traffic.webm",
+    "styles": ["formal", "sarcastic", "humorous_tech", "humorous_non_tech"]
+  },
+  {
+    "task_id": "web_traffic_soundscape",
+    "video_url": "https://upload.wikimedia.org/wikipedia/commons/e/e3/Traffic_on_a_cobbled_street_-_soundscape.webm",
+    "styles": ["formal", "sarcastic", "humorous_tech", "humorous_non_tech"]
+  },
+  {
+    "task_id": "web_kitten_playing",
+    "video_url": "https://upload.wikimedia.org/wikipedia/commons/d/d2/Calico_kitten_playing.webm",
+    "styles": ["formal", "sarcastic", "humorous_tech", "humorous_non_tech"]
+  },
+  {
+    "task_id": "web_cookies_baking",
+    "video_url": "https://upload.wikimedia.org/wikipedia/commons/f/fb/Cookies_baking.webm",
+    "styles": ["formal", "sarcastic", "humorous_tech", "humorous_non_tech"]
+  },
+  {
+    "task_id": "web_train_arriving",
+    "video_url": "https://upload.wikimedia.org/wikipedia/commons/3/35/Amtrak_train_51_arriving_at_Thurmond.webm",
+    "styles": ["formal", "sarcastic", "humorous_tech", "humorous_non_tech"]
+  },
+  {
+    "task_id": "web_sous_vide",
+    "video_url": "https://upload.wikimedia.org/wikipedia/commons/f/f6/Sous_vide_overview_by_Nomiku_with_VO.webm",
+    "styles": ["formal", "sarcastic", "humorous_tech", "humorous_non_tech"]
+  },
+  {
+    "task_id": "web_typewriter",
+    "video_url": "https://upload.wikimedia.org/wikipedia/commons/7/7d/Electrical_typewriter_by_IBM_from_1988.webm",
+    "styles": ["formal", "sarcastic", "humorous_tech", "humorous_non_tech"]
+  },
+  {
+    "task_id": "web_calculator",
+    "video_url": "https://upload.wikimedia.org/wikipedia/commons/c/ce/Typing_the_calculation_for_%228_times_6%22_into_a_pocket_calculator_HP-32SII_which_uses_RPN_logic.webm",
+    "styles": ["formal", "sarcastic", "humorous_tech", "humorous_non_tech"]
+  }
+]

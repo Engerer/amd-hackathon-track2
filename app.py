@@ -12,7 +12,7 @@ import streamlit as st
 from track2_captioner.caption_pipeline import CaptionPipeline
 from track2_captioner.config import Settings, load_settings
 from track2_captioner.transcription import WHISPER_MODELS, transcribe_video
-from track2_captioner.video_ingest import VIDEO_EXTENSIONS, VideoAsset, discover_videos
+from track2_captioner.video_ingest import VIDEO_EXTENSIONS, VideoAsset, discover_videos, probe_duration_seconds
 
 
 APP_ROOT = Path(__file__).resolve().parent
@@ -31,6 +31,7 @@ STYLE_LABELS = {
 }
 DEFAULT_FRAME_COUNT = 10
 FRAME_OPTIONS = [5, 8, 10, 12, 16]
+MAX_VIDEO_SECONDS = 120
 
 
 def compact_model_name(model: str) -> str:
@@ -126,6 +127,25 @@ def count_passes(results: list[dict[str, Any]]) -> tuple[int, int]:
             if check.get("tone") == "pass":
                 passed += 1
     return passed, total
+
+
+def format_duration(seconds: float) -> str:
+    minutes, remaining = divmod(round(seconds), 60)
+    return f"{minutes}:{remaining:02d}"
+
+
+def split_assets_by_duration(assets: list[VideoAsset]) -> tuple[list[VideoAsset], list[tuple[VideoAsset, float]]]:
+    accepted: list[VideoAsset] = []
+    skipped: list[tuple[VideoAsset, float]] = []
+
+    for asset in assets:
+        duration = probe_duration_seconds(asset.path)
+        if duration is not None and duration > MAX_VIDEO_SECONDS:
+            skipped.append((asset, duration))
+        else:
+            accepted.append(asset)
+
+    return accepted, skipped
 
 
 def render_storyboard(frame_paths: list[str]) -> None:
@@ -262,6 +282,7 @@ def main() -> None:
 
         st.metric("Model", compact_model_name(model))
         st.metric("Frames", max_frames)
+        st.metric("Max length", format_duration(MAX_VIDEO_SECONDS))
         st.metric("Sampling", "Smart")
         st.metric("Checks", "On" if run_checks else "Off")
         st.caption("Proxy connected" if proxy_url and backend == "Proxy" else "Direct API" if backend == "Direct Fireworks" else "Dry run")
@@ -322,6 +343,18 @@ def main() -> None:
 
         if not assets:
             st.warning("No supported video files found.")
+            return
+
+        assets, skipped_assets = split_assets_by_duration(assets)
+        if skipped_assets:
+            skipped = ", ".join(
+                f"{asset.path.name} ({format_duration(duration)})"
+                for asset, duration in skipped_assets
+            )
+            st.warning(f"Skipped videos longer than {format_duration(MAX_VIDEO_SECONDS)}: {skipped}")
+
+        if not assets:
+            st.warning(f"No videos under {format_duration(MAX_VIDEO_SECONDS)} to process.")
             return
 
         if not dry_run and backend == "Direct Fireworks" and not api_key:
