@@ -12,7 +12,14 @@ import streamlit as st
 from track2_captioner.caption_pipeline import CaptionPipeline
 from track2_captioner.config import Settings, load_settings
 from track2_captioner.transcription import WHISPER_MODELS, transcribe_video
-from track2_captioner.video_ingest import VIDEO_EXTENSIONS, VideoAsset, discover_videos, probe_duration_seconds
+from track2_captioner.video_ingest import (
+    DEFAULT_FRAME_INTERVAL_SECONDS,
+    DEFAULT_MAX_FRAMES,
+    VIDEO_EXTENSIONS,
+    VideoAsset,
+    discover_videos,
+    probe_duration_seconds,
+)
 
 
 APP_ROOT = Path(__file__).resolve().parent
@@ -29,8 +36,8 @@ STYLE_LABELS = {
     "humorous_tech": "Humorous-tech",
     "humorous_non_tech": "Humorous non-tech",
 }
-DEFAULT_FRAME_COUNT = 10
-FRAME_OPTIONS = [5, 8, 10, 12, 16]
+DEFAULT_FRAME_COUNT = DEFAULT_MAX_FRAMES
+FRAME_OPTIONS = [20, 30, 40, 50, 60]
 MIN_VIDEO_SECONDS = 30
 MAX_VIDEO_SECONDS = 120
 
@@ -251,13 +258,16 @@ def main() -> None:
     judge_model = defaults.judge_model
 
     st.title("Track 2 Caption Studio")
-    st.caption(f"{compact_model_name(model)} | smart {DEFAULT_FRAME_COUNT}-frame sampling | checks off")
+    st.caption(
+        f"{compact_model_name(model)} | 1 frame every "
+        f"{DEFAULT_FRAME_INTERVAL_SECONDS:g}s | cap {DEFAULT_FRAME_COUNT} | checks off"
+    )
 
     with st.sidebar:
         st.header("Preset")
         with st.expander("Advanced", expanded=False):
             source_mode = st.radio("Source", ["Upload", "data/videos"], horizontal=True)
-            max_frames = st.select_slider("Frame budget", options=frame_options, value=DEFAULT_FRAME_COUNT)
+            max_frames = st.select_slider("Frame cap", options=frame_options, value=DEFAULT_FRAME_COUNT)
             dry_run = st.toggle("Dry run", value=dry_run)
             run_checks = st.toggle("Quality checks", value=False)
 
@@ -284,9 +294,9 @@ def main() -> None:
                 judge_model = st.text_input("Judge model", value=defaults.judge_model, disabled=dry_run)
 
         st.metric("Model", compact_model_name(model))
-        st.metric("Frames", max_frames)
+        st.metric("Frame cap", max_frames)
         st.metric("Length", f"{format_duration(MIN_VIDEO_SECONDS)}-{format_duration(MAX_VIDEO_SECONDS)}")
-        st.metric("Sampling", "Smart")
+        st.metric("Sampling", f"1/{DEFAULT_FRAME_INTERVAL_SECONDS:g}s")
         st.metric("Checks", "On" if run_checks else "Off")
         st.caption("Proxy connected" if proxy_url and backend == "Proxy" else "Direct API" if backend == "Direct Fireworks" else "Dry run")
 

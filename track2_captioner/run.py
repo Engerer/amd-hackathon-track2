@@ -7,7 +7,7 @@ from pathlib import Path
 from track2_captioner.caption_pipeline import CaptionPipeline
 from track2_captioner.config import load_settings
 from track2_captioner.transcription import WHISPER_MODELS, transcribe_video
-from track2_captioner.video_ingest import discover_videos
+from track2_captioner.video_ingest import DEFAULT_MAX_FRAMES, discover_videos
 
 
 def parse_args() -> argparse.Namespace:
@@ -16,7 +16,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, default=Path("outputs/captions.json"), help="Output JSON path.")
     parser.add_argument("--work-dir", type=Path, default=Path("data/frames"), help="Frame extraction folder.")
     parser.add_argument("--transcripts", type=Path, default=None, help="Optional transcript folder.")
-    parser.add_argument("--max-frames", type=int, default=10, help="Maximum sampled frames per video.")
+    parser.add_argument("--max-frames", type=int, default=DEFAULT_MAX_FRAMES, help="Maximum sampled frames per video.")
     parser.add_argument("--auto-transcribe", action="store_true", help="Generate missing transcripts with Whisper.")
     parser.add_argument("--whisper-model", choices=WHISPER_MODELS, default="base", help="Whisper model size.")
     parser.add_argument("--whisper-language", default="", help="Optional Whisper language code, for example en.")

@@ -8,7 +8,7 @@ from track2_captioner.config import Settings
 from track2_captioner.fireworks_client import FireworksClient, image_to_data_url
 from track2_captioner.json_tools import parse_json_object
 from track2_captioner.prompts import STYLE_PROMPTS, load_prompt
-from track2_captioner.video_ingest import VideoAsset, extract_frames
+from track2_captioner.video_ingest import DEFAULT_MAX_FRAMES, VideoAsset, extract_frames
 
 
 EMPTY_OBSERVATIONS = {
@@ -28,7 +28,7 @@ class CaptionPipeline:
         settings: Settings,
         work_dir: Path,
         dry_run: bool = False,
-        max_frames: int = 10,
+        max_frames: int = DEFAULT_MAX_FRAMES,
         run_checks: bool = True,
     ) -> None:
         self.settings = settings

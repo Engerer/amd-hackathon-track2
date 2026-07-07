@@ -8,6 +8,9 @@ from pathlib import Path
 
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
+DEFAULT_FRAME_INTERVAL_SECONDS = 3.0
+DEFAULT_MAX_FRAMES = 40
+DEFAULT_FRAME_WIDTH = 768
 
 
 @dataclass(frozen=True)
@@ -71,14 +74,15 @@ def _run_ffmpeg(command: list[str]) -> bool:
         return False
 
 
-def _extract_uniform_frames(video_path: Path, frame_dir: Path, max_frames: int, width: int) -> list[Path]:
+def _extract_timeline_frames(
+    video_path: Path,
+    frame_dir: Path,
+    frame_interval_seconds: float,
+    max_frames: int,
+    width: int,
+) -> list[Path]:
     _reset_dir(frame_dir)
-    duration = probe_duration_seconds(video_path)
-
-    if duration and duration > 0:
-        fps = min(max_frames / duration, 1.0)
-    else:
-        fps = 0.2
+    fps = 1 / max(frame_interval_seconds, 0.1)
 
     output_pattern = frame_dir / "frame_%03d.jpg"
     command = [
@@ -99,38 +103,22 @@ def _extract_uniform_frames(video_path: Path, frame_dir: Path, max_frames: int, 
     return sorted(frame_dir.glob("frame_*.jpg"))
 
 
-def _extract_scene_frames(video_path: Path, frame_dir: Path, max_frames: int, width: int) -> list[Path]:
-    _reset_dir(frame_dir)
-    output_pattern = frame_dir / "frame_%03d.jpg"
-    command = [
-        "ffmpeg",
-        "-y",
-        "-i",
-        str(video_path),
-        "-vf",
-        f"select='gt(scene,0.12)',scale={width}:-1",
-        "-fps_mode",
-        "vfr",
-        "-frames:v",
-        str(max_frames),
-        "-q:v",
-        "3",
-        str(output_pattern),
-    ]
-    if not _run_ffmpeg(command):
-        return []
-    return sorted(frame_dir.glob("frame_*.jpg"))
-
-
-def extract_frames(video_path: Path, frame_dir: Path, max_frames: int = 10, width: int = 768) -> list[Path]:
+def extract_frames(
+    video_path: Path,
+    frame_dir: Path,
+    max_frames: int = DEFAULT_MAX_FRAMES,
+    width: int = DEFAULT_FRAME_WIDTH,
+    frame_interval_seconds: float = DEFAULT_FRAME_INTERVAL_SECONDS,
+) -> list[Path]:
     frame_dir.mkdir(parents=True, exist_ok=True)
 
-    scene_frames = _extract_scene_frames(video_path, frame_dir / "scene", max_frames, width)
-    minimum_scene_frames = max(3, min(max_frames, max_frames // 2))
-    if len(scene_frames) >= minimum_scene_frames:
-        return scene_frames
-
-    uniform_frames = _extract_uniform_frames(video_path, frame_dir / "uniform", max_frames, width)
-    if not uniform_frames:
+    frames = _extract_timeline_frames(
+        video_path=video_path,
+        frame_dir=frame_dir / "timeline",
+        frame_interval_seconds=frame_interval_seconds,
+        max_frames=max_frames,
+        width=width,
+    )
+    if not frames:
         raise RuntimeError(f"Could not extract frames from {video_path}")
-    return uniform_frames
+    return frames

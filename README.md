@@ -23,13 +23,13 @@ https://github.com/nish0203/amd-track2-captioner
 
 ## How It Works
 
-The pipeline samples frames instead of processing every video frame. It prefers scene-change frames when enough are available, then falls back to evenly spaced frames for simple continuous clips.
+The pipeline samples frames instead of processing every video frame. By default it extracts one timeline frame every 3 seconds, capped at 40 frames for cost and runtime control.
 
 ```text
 video URL
  -> download video
  -> ffprobe checks duration
- -> ffmpeg extracts smart sampled frames
+ -> ffmpeg extracts one frame every 3 seconds
  -> resize each frame to 768px width
  -> Kimi K2.6 creates factual observations
  -> Kimi K2.6 writes four styled captions
@@ -55,13 +55,14 @@ The caption calls use those observations only, so they are cheaper than sending 
 ## Defaults
 
 - Model: `accounts/fireworks/models/kimi-k2p6`
-- Frame sampling: smart `10` total frames per video
+- Frame sampling: `1` frame every `3` seconds
+- Frame cap: `40` total frames per video
 - Frame width: `768px`
 - Whisper audio transcription: off by default
 - Internal judge checks: off by default
 - Fireworks key: stored in a Cloudflare Worker secret, not in the repo
 
-Important: `10` means **10 total sampled frames**, not 10 FPS.
+Important: `40` is a safety cap, not 40 FPS. A 30-second video gives about 10 frames, and a 2-minute video gives about 40 frames.
 
 ## Quick Start
 
@@ -223,7 +224,7 @@ Example output:
 Useful variables:
 
 ```text
-TRACK2_MAX_FRAMES=10
+TRACK2_MAX_FRAMES=40
 TRACK2_DRY_RUN=true
 RUN_CHECKS=true
 AUTO_TRANSCRIBE=true
@@ -238,7 +239,7 @@ Recommended final settings:
 ```text
 RUN_CHECKS=false
 AUTO_TRANSCRIBE=false
-TRACK2_MAX_FRAMES=10
+TRACK2_MAX_FRAMES=40
 ```
 
 ## Prompt Tuning

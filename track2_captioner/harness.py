@@ -13,7 +13,7 @@ import requests
 from track2_captioner.caption_pipeline import CaptionPipeline
 from track2_captioner.config import load_settings
 from track2_captioner.transcription import transcribe_video
-from track2_captioner.video_ingest import VIDEO_EXTENSIONS, VideoAsset
+from track2_captioner.video_ingest import DEFAULT_MAX_FRAMES, VIDEO_EXTENSIONS, VideoAsset
 
 
 DEFAULT_STYLES = ["formal", "sarcastic", "humorous_tech", "humorous_non_tech"]
@@ -71,7 +71,7 @@ def run_harness(input_path: Path, output_path: Path) -> int:
     auto_transcribe = truthy(os.getenv("AUTO_TRANSCRIBE"))
     force_transcribe = truthy(os.getenv("FORCE_TRANSCRIBE"))
     run_checks = truthy(os.getenv("RUN_CHECKS"))
-    max_frames = int(os.getenv("TRACK2_MAX_FRAMES", "10"))
+    max_frames = int(os.getenv("TRACK2_MAX_FRAMES", str(DEFAULT_MAX_FRAMES)))
     whisper_model = os.getenv("WHISPER_MODEL", "base")
     whisper_language = os.getenv("WHISPER_LANGUAGE", "").strip() or None
 
