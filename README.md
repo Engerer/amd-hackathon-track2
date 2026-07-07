@@ -9,7 +9,7 @@ The agent captions each video in four required styles:
 - `humorous_tech`
 - `humorous_non_tech`
 
-Current submission image:
+Submission image:
 
 ```text
 somnuskai/amd-track2-captioner:latest
@@ -23,7 +23,7 @@ https://github.com/nish0203/amd-track2-captioner
 
 ## How It Works
 
-The pipeline does not process every video frame. It samples a small number of frames across the video to control cost and runtime.
+The pipeline samples frames instead of processing every video frame.
 
 ```text
 video URL
@@ -36,7 +36,7 @@ video URL
  -> Docker writes /output/results.json
 ```
 
-The observation step creates structured facts like:
+The first Kimi call receives image frames and creates observations:
 
 ```json
 {
@@ -50,34 +50,38 @@ The observation step creates structured facts like:
 }
 ```
 
-Then the style prompts generate captions from those observations. Only the first Kimi call sends image frames; later caption calls are text-only and cheaper.
+The caption calls use those observations only, so they are cheaper than sending frames again.
 
-## Current Defaults
+## Defaults
 
 - Model: `accounts/fireworks/models/kimi-k2p6`
 - Frame sampling: `10` total frames per video
 - Frame width: `768px`
 - Whisper audio transcription: off by default
 - Internal judge checks: off by default
-- Fireworks key: stored in Cloudflare Worker secret, not in the repo
+- Fireworks key: stored in a Cloudflare Worker secret, not in the repo
 
 Important: `10` means **10 total sampled frames**, not 10 FPS.
 
-## What Teammates Need To Do
+## Quick Start
 
-Each teammate should pick one lane.
-
-### Person 1: App And Demo Testing
-
-Run the web app, upload clips, check whether captions make sense, and collect screenshots for the final submission.
-
-Commands:
+Clone the repo:
 
 ```powershell
 git clone https://github.com/nish0203/amd-track2-captioner.git
 cd amd-track2-captioner
+```
+
+Create the Python environment:
+
+```powershell
 python -m venv .venv
 .\.venv\Scripts\pip install -r requirements.txt
+```
+
+Run the web app:
+
+```powershell
 .\.venv\Scripts\streamlit run app.py
 ```
 
@@ -87,106 +91,19 @@ Open:
 http://127.0.0.1:8501
 ```
 
-Do not paste any API key into Discord or GitHub.
+## Use The Web App
 
-### Person 2: Caption Quality
+1. Open the app.
+2. Upload one or more videos.
+3. Click **Generate captions**.
+4. Review the four captions for each video.
+5. Download the JSON if needed.
 
-Tune prompts inside:
+Advanced settings are in the collapsed sidebar. Most users can leave them unchanged.
 
-```text
-prompts/
-```
+## Run A Dry Test
 
-Focus on:
-
-- reducing hallucinated details
-- keeping captions accurate
-- making each style clearly different
-- keeping captions short and punchy
-
-Main files:
-
-```text
-prompts/formal.txt
-prompts/sarcastic.txt
-prompts/humorous-tech.txt
-prompts/humorous-non-tech.txt
-prompts/perception_system.txt
-```
-
-### Person 3: Docker And Submission
-
-Verify the Docker image works exactly like the hackathon evaluator expects.
-
-Run:
-
-```powershell
-docker run --rm -v "${PWD}\sample_input:/input:ro" -v "${PWD}\sample_output:/output" somnuskai/amd-track2-captioner:latest
-```
-
-Check:
-
-```text
-sample_output/results.json
-```
-
-The file must be valid JSON and contain all requested styles.
-
-### Person 4: Research And Model Testing
-
-Compare model options and report whether they support image input.
-
-Current status:
-
-- Kimi K2.6 works and supports image input.
-- DeepSeek V4 works for text but does not support image input.
-- Gemma 4 E4B needs Fireworks deployment and currently fails without payment method.
-
-Useful question to answer:
-
-```text
-Does this model support image input through Fireworks chat completions?
-```
-
-### Person 5: Final Materials
-
-Prepare submission assets:
-
-- project description
-- demo video script
-- screenshots
-- explanation of the pipeline
-- final Docker image name
-- GitHub repo link
-
-Short project explanation:
-
-```text
-We sample frames from each video, turn those frames into structured observations with Kimi K2.6, then generate four captions from the same factual observations. This keeps the captions accurate while still matching the required formal, sarcastic, humorous-tech, and humorous-non-tech styles.
-```
-
-## Local Development
-
-Install Python dependencies:
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\pip install -r requirements.txt
-```
-
-Optional Whisper support:
-
-```powershell
-.\.venv\Scripts\pip install -r requirements-whisper.txt
-```
-
-Run the web app:
-
-```powershell
-.\.venv\Scripts\streamlit run app.py
-```
-
-Run a dry test without spending Fireworks credits:
+Dry-run mode checks the input/output flow without spending Fireworks credits.
 
 ```powershell
 $env:TRACK2_DRY_RUN="1"
@@ -196,7 +113,15 @@ $env:TRACK2_OUTPUT="sample_output/results.json"
 Remove-Item Env:TRACK2_DRY_RUN,Env:TRACK2_INPUT,Env:TRACK2_OUTPUT
 ```
 
-Run the real local harness:
+Check:
+
+```text
+sample_output/results.json
+```
+
+## Run The Real Local Harness
+
+This uses the configured model/proxy and spends Fireworks credits.
 
 ```powershell
 $env:TRACK2_INPUT="sample_input/tasks.json"
@@ -204,6 +129,25 @@ $env:TRACK2_OUTPUT="sample_output/results.json"
 .\.venv\Scripts\python -m track2_captioner.harness
 Remove-Item Env:TRACK2_INPUT,Env:TRACK2_OUTPUT
 ```
+
+## Optional Whisper
+
+Whisper can transcribe video audio and pass the transcript into the caption pipeline.
+
+Install optional dependencies:
+
+```powershell
+.\.venv\Scripts\pip install -r requirements-whisper.txt
+```
+
+Enable it for harness runs:
+
+```powershell
+$env:AUTO_TRANSCRIBE="true"
+$env:WHISPER_MODEL="base"
+```
+
+For final submission, Whisper is off by default to keep runtime and Docker size smaller.
 
 ## Docker
 
@@ -226,7 +170,7 @@ docker tag amd-track2-captioner:local somnuskai/amd-track2-captioner:latest
 docker push somnuskai/amd-track2-captioner:latest
 ```
 
-Submission image:
+Public submission image:
 
 ```text
 somnuskai/amd-track2-captioner:latest
@@ -252,7 +196,7 @@ Example input:
 ]
 ```
 
-Our container writes:
+The container writes:
 
 ```text
 /output/results.json
@@ -289,13 +233,23 @@ MODEL_PROXY_URL=https://track2-fireworks-proxy.proxide-track2.workers.dev
 FIREWORKS_MODEL=accounts/fireworks/models/kimi-k2p6
 ```
 
-For final submission, keep:
+Recommended final settings:
 
 ```text
 RUN_CHECKS=false
 AUTO_TRANSCRIBE=false
 TRACK2_MAX_FRAMES=10
 ```
+
+## Prompt Tuning
+
+Prompt files live in:
+
+```text
+prompts/
+```
+
+Tune prompts when captions hallucinate details, miss the required style, or become too long.
 
 ## Security
 
@@ -330,7 +284,6 @@ The Fireworks API key is stored as a Cloudflare Worker secret.
 - All four styles are present
 - No hardcoded sample answers
 - Fireworks key is not exposed
-- README and GitHub are updated
 
 ## Known Issues
 
