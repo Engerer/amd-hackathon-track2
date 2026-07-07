@@ -29,6 +29,12 @@ STYLE_LABELS = {
     "humorous_tech": "Humorous-tech",
     "humorous_non_tech": "Humorous non-tech",
 }
+DEFAULT_FRAME_COUNT = 10
+FRAME_OPTIONS = [5, 8, 10, 12, 16]
+
+
+def compact_model_name(model: str) -> str:
+    return model.rsplit("/", 1)[-1] if model else "Not set"
 
 
 def safe_filename(name: str) -> str:
@@ -129,14 +135,14 @@ def render_result(item: dict[str, Any]) -> None:
             st.error(item["error"])
             return
 
-        left, right = st.columns([0.9, 1.3], gap="large")
+        left, right = st.columns([0.85, 1.35], gap="large")
         with left:
             source_text = item.get("source_path", "")
             source = Path(source_text) if source_text else None
             if source and source.is_file():
                 st.video(str(source))
-            st.subheader("Observations")
-            st.json(item.get("observations", {}), expanded=False)
+            with st.expander("Observations", expanded=False):
+                st.json(item.get("observations", {}), expanded=False)
 
         with right:
             captions = item.get("captions", {})
@@ -145,19 +151,20 @@ def render_result(item: dict[str, Any]) -> None:
             for tab, key in zip(tabs, STYLE_LABELS):
                 with tab:
                     st.write(captions.get(key, ""))
-                    status_cols = st.columns(2)
                     check = checks.get(key, {})
-                    status_cols[0].metric("Accuracy", check.get("accuracy", "n/a"))
-                    status_cols[1].metric("Tone", check.get("tone", "n/a"))
-                    if check.get("notes"):
-                        st.caption(check["notes"])
+                    if check:
+                        status_cols = st.columns(2)
+                        status_cols[0].metric("Accuracy", check.get("accuracy", "n/a"))
+                        status_cols[1].metric("Tone", check.get("tone", "n/a"))
+                        if check.get("notes"):
+                            st.caption(check["notes"])
 
 
 def main() -> None:
     st.set_page_config(
         page_title="Track 2 Caption Studio",
         layout="wide",
-        initial_sidebar_state="expanded",
+        initial_sidebar_state="collapsed",
     )
     ensure_dirs()
 
@@ -168,9 +175,8 @@ def main() -> None:
     st.markdown(
         """
         <style>
-        .stApp { background: #f7f8fb; }
-        [data-testid="stSidebar"] { background: #111827; color: #f9fafb; }
-        [data-testid="stSidebar"] label, [data-testid="stSidebar"] p { color: #f9fafb; }
+        .stApp { background: #f8fafc; }
+        [data-testid="stSidebar"] { background: #ffffff; border-right: 1px solid #e5e7eb; }
         h1, h2, h3 { letter-spacing: 0; }
         div[data-testid="stMetric"] {
             background: #ffffff;
@@ -186,78 +192,96 @@ def main() -> None:
         unsafe_allow_html=True,
     )
 
+    default_backend = "Proxy" if defaults.proxy_url else "Direct Fireworks"
+    frame_options = sorted(set(FRAME_OPTIONS + [DEFAULT_FRAME_COUNT]))
+    source_mode = "Upload"
+    dry_run = not bool(defaults.api_key or defaults.proxy_url)
+    max_frames = DEFAULT_FRAME_COUNT
+    run_checks = False
+    auto_transcribe = False
+    whisper_model = WHISPER_MODELS[1] if len(WHISPER_MODELS) > 1 else WHISPER_MODELS[0]
+    whisper_language = ""
+    force_transcribe = False
+    backend = default_backend
+    api_key = os.getenv("FIREWORKS_API_KEY", "")
+    proxy_url = defaults.proxy_url
+    proxy_token = defaults.proxy_token
+    model = defaults.model
+    judge_model = defaults.judge_model
+
     st.title("Track 2 Caption Studio")
+    st.caption(f"{compact_model_name(model)} | {DEFAULT_FRAME_COUNT} sampled frames | checks off")
 
     with st.sidebar:
-        st.header("Run")
-        source_mode = st.radio("Video source", ["Upload", "data/videos"], horizontal=True)
-        dry_run = st.toggle("Dry run", value=not bool(defaults.api_key or defaults.proxy_url))
-        max_frames = st.slider("Frames per video", min_value=4, max_value=24, value=5, step=1)
+        st.header("Preset")
+        with st.expander("Advanced", expanded=False):
+            source_mode = st.radio("Source", ["Upload", "data/videos"], horizontal=True)
+            max_frames = st.select_slider("Frame budget", options=frame_options, value=DEFAULT_FRAME_COUNT)
+            dry_run = st.toggle("Dry run", value=dry_run)
+            run_checks = st.toggle("Quality checks", value=False)
 
-        st.header("Audio")
-        auto_transcribe = st.toggle("Auto transcribe with Whisper", value=False)
-        whisper_model = st.selectbox("Whisper model", WHISPER_MODELS, index=1, disabled=not auto_transcribe)
-        whisper_language = st.text_input(
-            "Language",
-            value="",
-            placeholder="optional, e.g. en",
-            disabled=not auto_transcribe,
-        )
-        force_transcribe = st.toggle("Overwrite transcripts", value=False, disabled=not auto_transcribe)
+            auto_transcribe = st.toggle("Whisper", value=False)
+            if auto_transcribe:
+                whisper_model = st.selectbox("Whisper model", WHISPER_MODELS, index=1)
+                whisper_language = st.text_input("Language", value="", placeholder="optional, e.g. en")
+                force_transcribe = st.toggle("Overwrite transcripts", value=False)
 
-        st.header("Model Backend")
-        backend_options = ["Direct Fireworks", "Firebase proxy"]
-        default_backend = 1 if defaults.proxy_url else 0
-        backend = st.radio("Backend", backend_options, index=default_backend, disabled=dry_run)
-        api_key = st.text_input(
-            "Fireworks API key",
-            value=os.getenv("FIREWORKS_API_KEY", ""),
-            type="password",
-            disabled=dry_run or backend == "Firebase proxy",
-        )
-        proxy_url = st.text_input(
-            "Proxy URL",
-            value=defaults.proxy_url,
-            disabled=dry_run or backend == "Direct Fireworks",
-        )
-        proxy_token = st.text_input(
-            "Proxy token",
-            value=defaults.proxy_token,
-            type="password",
-            disabled=dry_run or backend == "Direct Fireworks",
-        )
-        model = st.text_input("Caption model", value=defaults.model, disabled=dry_run)
-        judge_model = st.text_input("Judge model", value=defaults.judge_model, disabled=dry_run)
+            backend = st.radio(
+                "Backend",
+                ["Proxy", "Direct Fireworks"],
+                index=0 if default_backend == "Proxy" else 1,
+                disabled=dry_run,
+            )
+            if backend == "Proxy":
+                proxy_url = st.text_input("Proxy URL", value=defaults.proxy_url, disabled=dry_run)
+                proxy_token = st.text_input("Proxy token", value=defaults.proxy_token, type="password", disabled=dry_run)
+            else:
+                api_key = st.text_input("Fireworks API key", value=api_key, type="password", disabled=dry_run)
 
-    upload_col, status_col = st.columns([1.2, 0.8], gap="large")
-    with upload_col:
+            model = st.text_input("Caption model", value=defaults.model, disabled=dry_run)
+            if run_checks:
+                judge_model = st.text_input("Judge model", value=defaults.judge_model, disabled=dry_run)
+
+        st.metric("Model", compact_model_name(model))
+        st.metric("Frames", max_frames)
+        st.metric("Checks", "On" if run_checks else "Off")
+        st.caption("Proxy connected" if proxy_url and backend == "Proxy" else "Direct API" if backend == "Direct Fireworks" else "Dry run")
+
+    input_col, run_col = st.columns([1.35, 0.65], gap="large")
+    with input_col:
+        st.subheader("Videos")
         if source_mode == "Upload":
             video_files = st.file_uploader(
-                "Videos",
+                "Upload videos",
                 type=[ext.lstrip(".") for ext in sorted(VIDEO_EXTENSIONS)],
                 accept_multiple_files=True,
             )
-            transcript_files = st.file_uploader(
-                "Matching transcripts",
-                type=["txt"],
-                accept_multiple_files=True,
-            )
+            video_files = list(video_files or [])
+            with st.expander("Transcripts", expanded=False):
+                transcript_files = st.file_uploader(
+                    "Upload matching .txt files",
+                    type=["txt"],
+                    accept_multiple_files=True,
+                )
+                transcript_files = list(transcript_files or [])
             existing_assets: list[VideoAsset] = []
         else:
             video_files = []
             transcript_files = []
             existing_assets = discover_videos(DEFAULT_VIDEO_DIR.resolve(), DEFAULT_TRANSCRIPT_DIR.resolve())
-            st.info(f"{len(existing_assets)} video file(s) in {DEFAULT_VIDEO_DIR}")
+            st.write([asset.path.name for asset in existing_assets] or "No files in data/videos.")
 
-    with status_col:
+    with run_col:
+        st.subheader("Run")
         results = st.session_state.results
         passed, total = count_passes(results)
+        queued_count = len(video_files) if source_mode == "Upload" else len(existing_assets)
         metric_cols = st.columns(3)
-        metric_cols[0].metric("Videos", len(results))
-        metric_cols[1].metric("Captions", len(caption_only(results)) * 4)
+        metric_cols[0].metric("Queued", queued_count)
+        metric_cols[1].metric("Results", len(results))
         metric_cols[2].metric("Checks", f"{passed}/{total}" if total else "0/0")
 
-        run_clicked = st.button("Run captioning", type="primary", use_container_width=True)
+        run_clicked = st.button("Generate captions", type="primary", use_container_width=True)
         clear_clicked = st.button("Clear results", use_container_width=True)
 
     if clear_clicked:
@@ -285,7 +309,7 @@ def main() -> None:
             st.error("Fireworks API key is required.")
             return
 
-        if not dry_run and backend == "Firebase proxy" and not proxy_url:
+        if not dry_run and backend == "Proxy" and not proxy_url:
             st.error("Proxy URL is required.")
             return
 
@@ -294,10 +318,16 @@ def main() -> None:
             model=model,
             judge_model=judge_model,
             base_url=defaults.base_url,
-            proxy_url=proxy_url if backend == "Firebase proxy" else "",
-            proxy_token=proxy_token if backend == "Firebase proxy" else "",
+            proxy_url=proxy_url if backend == "Proxy" else "",
+            proxy_token=proxy_token if backend == "Proxy" else "",
         )
-        pipeline = CaptionPipeline(settings=settings, work_dir=work_dir, dry_run=dry_run, max_frames=max_frames)
+        pipeline = CaptionPipeline(
+            settings=settings,
+            work_dir=work_dir,
+            dry_run=dry_run,
+            max_frames=max_frames,
+            run_checks=run_checks,
+        )
 
         progress = st.progress(0)
         current = st.empty()
@@ -331,6 +361,8 @@ def main() -> None:
         st.rerun()
 
     if st.session_state.results:
+        st.divider()
+        st.subheader("Results")
         full_json = json.dumps(st.session_state.results, indent=2)
         captions_json = json.dumps(caption_only(st.session_state.results), indent=2)
 
