@@ -129,7 +129,7 @@ python -m track2_captioner.harness
 Useful harness environment variables:
 
 - `TRACK2_DRY_RUN=true`
-- `TRACK2_MAX_FRAMES=8`
+- `TRACK2_MAX_FRAMES=5` samples five total frames per video, not five FPS.
 - `RUN_CHECKS=true`
 - `MODEL_PROXY_URL=https://us-central1-your-project.cloudfunctions.net/fireworksChat`
 - `AUTO_TRANSCRIBE=true`

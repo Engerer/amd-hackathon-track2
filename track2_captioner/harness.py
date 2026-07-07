@@ -71,7 +71,7 @@ def run_harness(input_path: Path, output_path: Path) -> int:
     auto_transcribe = truthy(os.getenv("AUTO_TRANSCRIBE"))
     force_transcribe = truthy(os.getenv("FORCE_TRANSCRIBE"))
     run_checks = truthy(os.getenv("RUN_CHECKS"))
-    max_frames = int(os.getenv("TRACK2_MAX_FRAMES", "8"))
+    max_frames = int(os.getenv("TRACK2_MAX_FRAMES", "5"))
     whisper_model = os.getenv("WHISPER_MODEL", "base")
     whisper_language = os.getenv("WHISPER_LANGUAGE", "").strip() or None
 

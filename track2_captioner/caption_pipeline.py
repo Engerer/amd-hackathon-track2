@@ -28,7 +28,7 @@ class CaptionPipeline:
         settings: Settings,
         work_dir: Path,
         dry_run: bool = False,
-        max_frames: int = 12,
+        max_frames: int = 5,
         run_checks: bool = True,
     ) -> None:
         self.settings = settings

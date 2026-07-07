@@ -192,7 +192,7 @@ def main() -> None:
         st.header("Run")
         source_mode = st.radio("Video source", ["Upload", "data/videos"], horizontal=True)
         dry_run = st.toggle("Dry run", value=not bool(defaults.api_key or defaults.proxy_url))
-        max_frames = st.slider("Frames per video", min_value=4, max_value=24, value=12, step=2)
+        max_frames = st.slider("Frames per video", min_value=4, max_value=24, value=5, step=1)
 
         st.header("Audio")
         auto_transcribe = st.toggle("Auto transcribe with Whisper", value=False)
