@@ -128,6 +128,18 @@ def count_passes(results: list[dict[str, Any]]) -> tuple[int, int]:
     return passed, total
 
 
+def render_storyboard(frame_paths: list[str]) -> None:
+    frames = [Path(path) for path in frame_paths if Path(path).is_file()]
+    if not frames:
+        return
+
+    st.caption(f"Storyboard: {len(frames)} sampled frames")
+    columns = st.columns(min(5, len(frames)))
+    for index, frame in enumerate(frames):
+        with columns[index % len(columns)]:
+            st.image(str(frame), caption=f"Frame {index + 1}", use_container_width=True)
+
+
 def render_result(item: dict[str, Any]) -> None:
     video_id = item.get("video_id", "video")
     with st.expander(video_id, expanded=True):
@@ -141,7 +153,13 @@ def render_result(item: dict[str, Any]) -> None:
             source = Path(source_text) if source_text else None
             if source and source.is_file():
                 st.video(str(source))
+            render_storyboard(item.get("frames", []))
             with st.expander("Observations", expanded=False):
+                frame_meta = {
+                    "frame_count": item.get("frame_count", 0),
+                    "sampling_strategy": item.get("sampling_strategy", "unknown"),
+                }
+                st.caption(json.dumps(frame_meta))
                 st.json(item.get("observations", {}), expanded=False)
 
         with right:
@@ -210,7 +228,7 @@ def main() -> None:
     judge_model = defaults.judge_model
 
     st.title("Track 2 Caption Studio")
-    st.caption(f"{compact_model_name(model)} | {DEFAULT_FRAME_COUNT} sampled frames | checks off")
+    st.caption(f"{compact_model_name(model)} | smart {DEFAULT_FRAME_COUNT}-frame sampling | checks off")
 
     with st.sidebar:
         st.header("Preset")
@@ -244,6 +262,7 @@ def main() -> None:
 
         st.metric("Model", compact_model_name(model))
         st.metric("Frames", max_frames)
+        st.metric("Sampling", "Smart")
         st.metric("Checks", "On" if run_checks else "Off")
         st.caption("Proxy connected" if proxy_url and backend == "Proxy" else "Direct API" if backend == "Direct Fireworks" else "Dry run")
 

@@ -5,6 +5,8 @@ Rules:
 - Make the humor understandable to a general audience.
 - Avoid tech jargon, programming references, and AI terminology.
 - Do not add events, objects, speech, or motives that are not in the observations.
+- Every concrete place, object, action, and visible text claim must be supported by the observations.
+- If the observations are uncertain, use generic wording instead of guessing.
 - Metaphors are allowed, but they must not imply unseen objects, dialogue, plans, or hidden intentions.
 - Humor may exaggerate the importance of visible actions only. Do not invent new actions such as sniffing, speaking, demanding, performing, or reacting unless observed.
 - Use the observed setting exactly. Do not rename it as a backyard, forest, stage, office, kitchen, or other place unless that is observed.

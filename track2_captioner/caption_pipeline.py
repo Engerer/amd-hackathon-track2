@@ -64,6 +64,9 @@ class CaptionPipeline:
         return {
             "video_id": asset.video_id,
             "source_path": str(asset.path),
+            "frames": [str(frame) for frame in frames],
+            "frame_count": len(frames),
+            "sampling_strategy": frames[0].parent.name if frames else "none",
             "observations": observations,
             "captions": captions,
             "checks": checks,
@@ -79,7 +82,7 @@ class CaptionPipeline:
                 "text": (
                     f"Video id: {asset.video_id}\n"
                     f"Optional transcript:\n{transcript or '[none provided]'}\n\n"
-                    "Analyze these sampled frames in chronological order."
+                    f"Analyze these {len(frames)} sampled frames in chronological order."
                 ),
             }
         ]

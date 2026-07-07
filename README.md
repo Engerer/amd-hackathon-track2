@@ -23,13 +23,13 @@ https://github.com/nish0203/amd-track2-captioner
 
 ## How It Works
 
-The pipeline samples frames instead of processing every video frame.
+The pipeline samples frames instead of processing every video frame. It prefers scene-change frames when enough are available, then falls back to evenly spaced frames for simple continuous clips.
 
 ```text
 video URL
  -> download video
  -> ffprobe checks duration
- -> ffmpeg extracts sampled frames
+ -> ffmpeg extracts smart sampled frames
  -> resize each frame to 768px width
  -> Kimi K2.6 creates factual observations
  -> Kimi K2.6 writes four styled captions
@@ -55,7 +55,7 @@ The caption calls use those observations only, so they are cheaper than sending 
 ## Defaults
 
 - Model: `accounts/fireworks/models/kimi-k2p6`
-- Frame sampling: `10` total frames per video
+- Frame sampling: smart `10` total frames per video
 - Frame width: `768px`
 - Whisper audio transcription: off by default
 - Internal judge checks: off by default
@@ -96,7 +96,7 @@ http://127.0.0.1:8501
 1. Open the app.
 2. Upload one or more videos.
 3. Click **Generate captions**.
-4. Review the four captions for each video.
+4. Review the sampled storyboard frames, observations, and four captions for each video.
 5. Download the JSON if needed.
 
 Advanced settings are in the collapsed sidebar. Most users can leave them unchanged.

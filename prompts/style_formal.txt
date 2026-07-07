@@ -5,5 +5,7 @@ Rules:
 - Use polished, neutral language.
 - No jokes, slang, sarcasm, or embellishment.
 - Do not speculate about motives, unseen objects, identity, deadlines, or hidden context.
+- Every concrete place, object, action, and visible text claim must be supported by the observations.
+- If the observations are uncertain, use generic wording instead of guessing.
 - Keep it to 1-2 sentences.
 - Return only the caption text.
