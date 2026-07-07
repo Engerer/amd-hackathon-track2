@@ -1,0 +1,367 @@
+from __future__ import annotations
+
+import json
+import os
+import re
+import time
+from pathlib import Path
+from typing import Any
+
+import streamlit as st
+
+from track2_captioner.caption_pipeline import CaptionPipeline
+from track2_captioner.config import Settings, load_settings
+from track2_captioner.transcription import WHISPER_MODELS, transcribe_video
+from track2_captioner.video_ingest import VIDEO_EXTENSIONS, VideoAsset, discover_videos
+
+
+APP_ROOT = Path(__file__).resolve().parent
+DATA_DIR = APP_ROOT / "data"
+DEFAULT_VIDEO_DIR = DATA_DIR / "videos"
+DEFAULT_TRANSCRIPT_DIR = DATA_DIR / "transcripts"
+OUTPUT_DIR = APP_ROOT / "outputs"
+WEB_RUN_DIR = OUTPUT_DIR / "web_runs"
+LATEST_OUTPUT = OUTPUT_DIR / "latest_web_results.json"
+
+STYLE_LABELS = {
+    "formal": "Formal",
+    "sarcastic": "Sarcastic",
+    "humorous_tech": "Humorous-tech",
+    "humorous_non_tech": "Humorous non-tech",
+}
+
+
+def safe_filename(name: str) -> str:
+    cleaned = Path(name).name
+    return re.sub(r"[^A-Za-z0-9._ -]", "_", cleaned).strip() or "uploaded_file"
+
+
+def ensure_dirs() -> None:
+    for path in [DEFAULT_VIDEO_DIR, DEFAULT_TRANSCRIPT_DIR, OUTPUT_DIR, WEB_RUN_DIR]:
+        path.mkdir(parents=True, exist_ok=True)
+
+
+def write_uploaded_files(files: list[Any], destination: Path) -> list[Path]:
+    destination.mkdir(parents=True, exist_ok=True)
+    saved: list[Path] = []
+    for uploaded_file in files:
+        target = destination / safe_filename(uploaded_file.name)
+        target.write_bytes(uploaded_file.getbuffer())
+        saved.append(target)
+    return saved
+
+
+def assets_from_uploads(video_files: list[Any], transcript_files: list[Any]) -> tuple[list[VideoAsset], Path]:
+    run_id = time.strftime("%Y%m%d-%H%M%S")
+    run_dir = WEB_RUN_DIR / run_id
+    video_dir = run_dir / "videos"
+    transcript_dir = run_dir / "transcripts"
+
+    saved_videos = [
+        path for path in write_uploaded_files(video_files, video_dir)
+        if path.suffix.lower() in VIDEO_EXTENSIONS
+    ]
+    write_uploaded_files(transcript_files, transcript_dir)
+
+    assets = []
+    for path in sorted(saved_videos):
+        transcript_path = transcript_dir / f"{path.stem}.txt"
+        assets.append(
+            VideoAsset(
+                video_id=path.stem,
+                path=path,
+                transcript_path=transcript_path if transcript_path.exists() else None,
+            )
+        )
+    return assets, run_dir
+
+
+def maybe_transcribe_asset(
+    asset: VideoAsset,
+    transcript_dir: Path,
+    model_name: str,
+    language: str,
+    force: bool,
+) -> VideoAsset:
+    transcript_path = transcribe_video(
+        video_path=asset.path,
+        transcript_dir=transcript_dir,
+        model_name=model_name,
+        language=language.strip() or None,
+        force=force,
+    )
+    return VideoAsset(
+        video_id=asset.video_id,
+        path=asset.path,
+        transcript_path=transcript_path,
+    )
+
+
+def caption_only(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "video_id": item.get("video_id", ""),
+            "captions": item.get("captions", {}),
+        }
+        for item in results
+        if "error" not in item
+    ]
+
+
+def count_passes(results: list[dict[str, Any]]) -> tuple[int, int]:
+    passed = 0
+    total = 0
+    for item in results:
+        checks = item.get("checks", {})
+        for check in checks.values():
+            total += 2
+            if check.get("accuracy") == "pass":
+                passed += 1
+            if check.get("tone") == "pass":
+                passed += 1
+    return passed, total
+
+
+def render_result(item: dict[str, Any]) -> None:
+    video_id = item.get("video_id", "video")
+    with st.expander(video_id, expanded=True):
+        if "error" in item:
+            st.error(item["error"])
+            return
+
+        left, right = st.columns([0.9, 1.3], gap="large")
+        with left:
+            source_text = item.get("source_path", "")
+            source = Path(source_text) if source_text else None
+            if source and source.is_file():
+                st.video(str(source))
+            st.subheader("Observations")
+            st.json(item.get("observations", {}), expanded=False)
+
+        with right:
+            captions = item.get("captions", {})
+            checks = item.get("checks", {})
+            tabs = st.tabs([STYLE_LABELS[key] for key in STYLE_LABELS])
+            for tab, key in zip(tabs, STYLE_LABELS):
+                with tab:
+                    st.write(captions.get(key, ""))
+                    status_cols = st.columns(2)
+                    check = checks.get(key, {})
+                    status_cols[0].metric("Accuracy", check.get("accuracy", "n/a"))
+                    status_cols[1].metric("Tone", check.get("tone", "n/a"))
+                    if check.get("notes"):
+                        st.caption(check["notes"])
+
+
+def main() -> None:
+    st.set_page_config(
+        page_title="Track 2 Caption Studio",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+    ensure_dirs()
+
+    defaults = load_settings()
+    if "results" not in st.session_state:
+        st.session_state.results = []
+
+    st.markdown(
+        """
+        <style>
+        .stApp { background: #f7f8fb; }
+        [data-testid="stSidebar"] { background: #111827; color: #f9fafb; }
+        [data-testid="stSidebar"] label, [data-testid="stSidebar"] p { color: #f9fafb; }
+        h1, h2, h3 { letter-spacing: 0; }
+        div[data-testid="stMetric"] {
+            background: #ffffff;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            padding: 12px 14px;
+        }
+        .stButton > button, .stDownloadButton > button {
+            border-radius: 8px;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.title("Track 2 Caption Studio")
+
+    with st.sidebar:
+        st.header("Run")
+        source_mode = st.radio("Video source", ["Upload", "data/videos"], horizontal=True)
+        dry_run = st.toggle("Dry run", value=not bool(defaults.api_key or defaults.proxy_url))
+        max_frames = st.slider("Frames per video", min_value=4, max_value=24, value=12, step=2)
+
+        st.header("Audio")
+        auto_transcribe = st.toggle("Auto transcribe with Whisper", value=False)
+        whisper_model = st.selectbox("Whisper model", WHISPER_MODELS, index=1, disabled=not auto_transcribe)
+        whisper_language = st.text_input(
+            "Language",
+            value="",
+            placeholder="optional, e.g. en",
+            disabled=not auto_transcribe,
+        )
+        force_transcribe = st.toggle("Overwrite transcripts", value=False, disabled=not auto_transcribe)
+
+        st.header("Model Backend")
+        backend_options = ["Direct Fireworks", "Firebase proxy"]
+        default_backend = 1 if defaults.proxy_url else 0
+        backend = st.radio("Backend", backend_options, index=default_backend, disabled=dry_run)
+        api_key = st.text_input(
+            "Fireworks API key",
+            value=os.getenv("FIREWORKS_API_KEY", ""),
+            type="password",
+            disabled=dry_run or backend == "Firebase proxy",
+        )
+        proxy_url = st.text_input(
+            "Proxy URL",
+            value=defaults.proxy_url,
+            disabled=dry_run or backend == "Direct Fireworks",
+        )
+        proxy_token = st.text_input(
+            "Proxy token",
+            value=defaults.proxy_token,
+            type="password",
+            disabled=dry_run or backend == "Direct Fireworks",
+        )
+        model = st.text_input("Caption model", value=defaults.model, disabled=dry_run)
+        judge_model = st.text_input("Judge model", value=defaults.judge_model, disabled=dry_run)
+
+    upload_col, status_col = st.columns([1.2, 0.8], gap="large")
+    with upload_col:
+        if source_mode == "Upload":
+            video_files = st.file_uploader(
+                "Videos",
+                type=[ext.lstrip(".") for ext in sorted(VIDEO_EXTENSIONS)],
+                accept_multiple_files=True,
+            )
+            transcript_files = st.file_uploader(
+                "Matching transcripts",
+                type=["txt"],
+                accept_multiple_files=True,
+            )
+            existing_assets: list[VideoAsset] = []
+        else:
+            video_files = []
+            transcript_files = []
+            existing_assets = discover_videos(DEFAULT_VIDEO_DIR.resolve(), DEFAULT_TRANSCRIPT_DIR.resolve())
+            st.info(f"{len(existing_assets)} video file(s) in {DEFAULT_VIDEO_DIR}")
+
+    with status_col:
+        results = st.session_state.results
+        passed, total = count_passes(results)
+        metric_cols = st.columns(3)
+        metric_cols[0].metric("Videos", len(results))
+        metric_cols[1].metric("Captions", len(caption_only(results)) * 4)
+        metric_cols[2].metric("Checks", f"{passed}/{total}" if total else "0/0")
+
+        run_clicked = st.button("Run captioning", type="primary", use_container_width=True)
+        clear_clicked = st.button("Clear results", use_container_width=True)
+
+    if clear_clicked:
+        st.session_state.results = []
+        st.rerun()
+
+    if run_clicked:
+        if source_mode == "Upload":
+            if not video_files:
+                st.warning("Add at least one video.")
+                return
+            assets, run_dir = assets_from_uploads(video_files, transcript_files)
+            transcript_dir = run_dir / "transcripts"
+            work_dir = run_dir / "frames"
+        else:
+            assets = existing_assets
+            transcript_dir = DEFAULT_TRANSCRIPT_DIR
+            work_dir = DATA_DIR / "frames"
+
+        if not assets:
+            st.warning("No supported video files found.")
+            return
+
+        if not dry_run and backend == "Direct Fireworks" and not api_key:
+            st.error("Fireworks API key is required.")
+            return
+
+        if not dry_run and backend == "Firebase proxy" and not proxy_url:
+            st.error("Proxy URL is required.")
+            return
+
+        settings = Settings(
+            api_key=api_key if backend == "Direct Fireworks" else "",
+            model=model,
+            judge_model=judge_model,
+            base_url=defaults.base_url,
+            proxy_url=proxy_url if backend == "Firebase proxy" else "",
+            proxy_token=proxy_token if backend == "Firebase proxy" else "",
+        )
+        pipeline = CaptionPipeline(settings=settings, work_dir=work_dir, dry_run=dry_run, max_frames=max_frames)
+
+        progress = st.progress(0)
+        current = st.empty()
+        results = []
+        for index, asset in enumerate(assets, start=1):
+            current.write(f"Processing {asset.video_id}")
+            try:
+                if auto_transcribe and (force_transcribe or asset.transcript_path is None):
+                    current.write(f"Transcribing {asset.video_id} with Whisper")
+                    asset = maybe_transcribe_asset(
+                        asset=asset,
+                        transcript_dir=transcript_dir,
+                        model_name=whisper_model,
+                        language=whisper_language,
+                        force=force_transcribe,
+                    )
+                    current.write(f"Processing {asset.video_id}")
+                results.append(pipeline.process(asset))
+            except Exception as exc:
+                results.append(
+                    {
+                        "video_id": asset.video_id,
+                        "source_path": str(asset.path),
+                        "error": str(exc),
+                    }
+                )
+            progress.progress(index / len(assets))
+
+        st.session_state.results = results
+        LATEST_OUTPUT.write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
+        st.rerun()
+
+    if st.session_state.results:
+        full_json = json.dumps(st.session_state.results, indent=2)
+        captions_json = json.dumps(caption_only(st.session_state.results), indent=2)
+
+        export_cols = st.columns([1, 1, 2])
+        export_cols[0].download_button(
+            "Download full JSON",
+            data=full_json,
+            file_name="captions_full.json",
+            mime="application/json",
+            use_container_width=True,
+        )
+        export_cols[1].download_button(
+            "Download captions JSON",
+            data=captions_json,
+            file_name="captions.json",
+            mime="application/json",
+            use_container_width=True,
+        )
+        export_cols[2].caption(str(LATEST_OUTPUT))
+
+        for item in st.session_state.results:
+            render_result(item)
+    else:
+        st.divider()
+        st.subheader("Queue")
+        if source_mode == "Upload":
+            names = [file.name for file in video_files] if video_files else []
+            st.write(names or "No upload selected.")
+        else:
+            st.write([asset.path.name for asset in existing_assets] or "No files in data/videos.")
+
+
+if __name__ == "__main__":
+    main()

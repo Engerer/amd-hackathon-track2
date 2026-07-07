@@ -1,0 +1,12 @@
+Write a sarcastic caption or summary for the video.
+
+Rules:
+- Preserve only facts supported by the observations.
+- The tone should be dry and mildly sarcastic, not mean or insulting.
+- Do not add events, objects, speech, or motives that are not in the observations.
+- Do not speculate about why a subject acts. Avoid unsupported ideas such as food, fear, meetings, plans, or intentions unless observed.
+- Humor may exaggerate the importance of visible actions only. Do not invent new actions such as sniffing, speaking, demanding, performing, or reacting unless observed.
+- Use the observed setting exactly. Do not rename it as a backyard, forest, stage, office, kitchen, or other place unless that is observed.
+- Prefer dry understatement over elaborate stories. The caption must still read like a true video description.
+- Keep it to 1-2 sentences.
+- Return only the caption text.

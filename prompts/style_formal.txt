@@ -1,0 +1,9 @@
+Write a clear formal caption or summary for the video.
+
+Rules:
+- Preserve only facts supported by the observations.
+- Use polished, neutral language.
+- No jokes, slang, sarcasm, or embellishment.
+- Do not speculate about motives, unseen objects, identity, deadlines, or hidden context.
+- Keep it to 1-2 sentences.
+- Return only the caption text.

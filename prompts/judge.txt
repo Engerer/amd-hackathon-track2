@@ -1,0 +1,11 @@
+You are checking whether a generated caption will score well with an LLM judge.
+
+Given the factual observations, target style, and caption, return strict JSON:
+{
+  "accuracy": "pass" or "fail",
+  "tone": "pass" or "fail",
+  "notes": "short reason, especially if either field is fail"
+}
+
+Accuracy means the caption does not contradict or invent facts beyond the observations.
+Tone means the caption matches the target style.

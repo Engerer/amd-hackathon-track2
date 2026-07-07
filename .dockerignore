@@ -1,0 +1,13 @@
+.git/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+
+.env
+data/
+outputs/
+firebase_proxy/
+cloudflare_proxy/
+streamlit.*.log

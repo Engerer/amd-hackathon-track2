@@ -1,0 +1,6 @@
+name = "track2-fireworks-proxy"
+main = "src/index.js"
+compatibility_date = "2026-07-07"
+
+[vars]
+FIREWORKS_BASE_URL = "https://api.fireworks.ai/inference/v1"
