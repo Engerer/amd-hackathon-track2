@@ -18,6 +18,14 @@ class Settings:
     base_url: str = "https://api.fireworks.ai/inference/v1"
     proxy_url: str = ""
     proxy_token: str = ""
+    # --- Generation parameters ---
+    temperature: float = 0.2
+    creative_temperature: float = 0.7
+    max_tokens: int = 700
+    caption_max_tokens: int = 220
+    check_max_tokens: int = 160
+    reasoning_effort: str = "none"
+    max_retries: int = 5
 
 
 def load_settings() -> Settings:
@@ -30,7 +38,7 @@ def load_settings() -> Settings:
     model = (
         os.getenv("FIREWORKS_MODEL")
         or (allowed_models[0] if allowed_models else None)
-        or "accounts/fireworks/models/kimi-k2p5"
+        or "accounts/fireworks/models/kimi-k2p6"
     )
     return Settings(
         api_key=os.getenv("FIREWORKS_API_KEY", ""),
@@ -39,4 +47,11 @@ def load_settings() -> Settings:
         base_url=os.getenv("FIREWORKS_BASE_URL", "https://api.fireworks.ai/inference/v1"),
         proxy_url=os.getenv("MODEL_PROXY_URL", ""),
         proxy_token=os.getenv("MODEL_PROXY_TOKEN", ""),
+        temperature=float(os.getenv("FIREWORKS_TEMPERATURE", "0.2")),
+        creative_temperature=float(os.getenv("FIREWORKS_CREATIVE_TEMPERATURE", "0.7")),
+        max_tokens=int(os.getenv("FIREWORKS_MAX_TOKENS", "700")),
+        caption_max_tokens=int(os.getenv("FIREWORKS_CAPTION_MAX_TOKENS", "220")),
+        check_max_tokens=int(os.getenv("FIREWORKS_CHECK_MAX_TOKENS", "160")),
+        reasoning_effort=os.getenv("FIREWORKS_REASONING_EFFORT", "none"),
+        max_retries=int(os.getenv("FIREWORKS_MAX_RETRIES", "5")),
     )

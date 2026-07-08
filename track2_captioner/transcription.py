@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import functools
 import shutil
 import subprocess
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 
 WHISPER_MODELS = ["tiny", "base", "small", "medium", "large"]
+
+# Shared thread pool for async transcription (1 worker — Whisper is GPU/CPU-bound)
+_TRANSCRIPTION_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="whisper")
 
 
 def transcribe_video(
@@ -51,16 +56,44 @@ def has_audio_stream(video_path: Path) -> bool:
     return bool(result.stdout.strip())
 
 
+def transcribe_video_async(
+    video_path: Path,
+    transcript_dir: Path,
+    model_name: str = "base",
+    language: str | None = None,
+    force: bool = False,
+) -> Future[Path]:
+    """Submit transcription to a background thread and return a Future.
+
+    Use this from the Streamlit app to keep the UI responsive while Whisper
+    runs.  Call ``future.result()`` to block until the transcript is ready.
+    """
+    return _TRANSCRIPTION_POOL.submit(
+        transcribe_video,
+        video_path,
+        transcript_dir,
+        model_name,
+        language,
+        force,
+    )
+
+
+@functools.lru_cache(maxsize=4)
+def _load_whisper_model(model_name: str):  # type: ignore[no-untyped-def]
+    """Load and cache a Whisper model so it is reused across videos in a batch."""
+    import whisper
+
+    return whisper.load_model(model_name)
+
+
 def _transcribe_with_python_whisper(
     video_path: Path,
     output_path: Path,
     model_name: str,
     language: str | None,
 ) -> Path:
-    import whisper
-
-    model = whisper.load_model(model_name)
-    options = {"fp16": False}
+    model = _load_whisper_model(model_name)
+    options: dict[str, object] = {"fp16": False}
     if language:
         options["language"] = language
     result = model.transcribe(str(video_path), **options)

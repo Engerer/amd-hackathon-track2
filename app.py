@@ -11,14 +11,15 @@ import streamlit as st
 
 from track2_captioner.caption_pipeline import CaptionPipeline
 from track2_captioner.config import Settings, load_settings
-from track2_captioner.transcription import WHISPER_MODELS, transcribe_video
+from track2_captioner.transcription import WHISPER_MODELS, transcribe_video, transcribe_video_async
 from track2_captioner.video_ingest import (
-    DEFAULT_FRAME_INTERVAL_SECONDS,
-    DEFAULT_MAX_FRAMES,
+    MAX_VIDEO_DURATION_SECONDS,
+    MIN_VIDEO_DURATION_SECONDS,
     VIDEO_EXTENSIONS,
     VideoAsset,
+    format_duration,
     discover_videos,
-    probe_duration_seconds,
+    validate_video_duration,
 )
 
 
@@ -36,10 +37,9 @@ STYLE_LABELS = {
     "humorous_tech": "Humorous-tech",
     "humorous_non_tech": "Humorous non-tech",
 }
-DEFAULT_FRAME_COUNT = DEFAULT_MAX_FRAMES
-FRAME_OPTIONS = [20, 30, 40, 50, 60]
-MIN_VIDEO_SECONDS = 30
-MAX_VIDEO_SECONDS = 120
+DEFAULT_FRAME_COUNT = 10
+FRAME_OPTIONS = [5, 8, 10, 12, 16]
+MAX_SESSION_RESULTS = 20
 
 
 def compact_model_name(model: str) -> str:
@@ -112,6 +112,21 @@ def maybe_transcribe_asset(
     )
 
 
+def strip_heavy_data(result: dict[str, Any]) -> dict[str, Any]:
+    """Remove base64 strings and large image data from a result dict.
+
+    Frame *paths* are kept so render_result can load images from disk.
+    """
+    cleaned = dict(result)
+    # Observations may contain leaked base64 if image data was echoed
+    obs = cleaned.get("observations")
+    if isinstance(obs, dict):
+        for key, value in list(obs.items()):
+            if isinstance(value, str) and len(value) > 10_000:
+                obs[key] = "[stripped — too large for session state]"
+    return cleaned
+
+
 def caption_only(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         {
@@ -135,27 +150,6 @@ def count_passes(results: list[dict[str, Any]]) -> tuple[int, int]:
             if check.get("tone") == "pass":
                 passed += 1
     return passed, total
-
-
-def format_duration(seconds: float) -> str:
-    minutes, remaining = divmod(round(seconds), 60)
-    return f"{minutes}:{remaining:02d}"
-
-
-def split_assets_by_duration(assets: list[VideoAsset]) -> tuple[list[VideoAsset], list[tuple[VideoAsset, float, str]]]:
-    accepted: list[VideoAsset] = []
-    skipped: list[tuple[VideoAsset, float, str]] = []
-
-    for asset in assets:
-        duration = probe_duration_seconds(asset.path)
-        if duration is not None and duration < MIN_VIDEO_SECONDS:
-            skipped.append((asset, duration, "too short"))
-        elif duration is not None and duration > MAX_VIDEO_SECONDS:
-            skipped.append((asset, duration, "too long"))
-        else:
-            accepted.append(asset)
-
-    return accepted, skipped
 
 
 def render_storyboard(frame_paths: list[str]) -> None:
@@ -258,16 +252,13 @@ def main() -> None:
     judge_model = defaults.judge_model
 
     st.title("Track 2 Caption Studio")
-    st.caption(
-        f"{compact_model_name(model)} | 1 frame every "
-        f"{DEFAULT_FRAME_INTERVAL_SECONDS:g}s | cap {DEFAULT_FRAME_COUNT} | checks off"
-    )
+    st.caption(f"{compact_model_name(model)} | anchored {DEFAULT_FRAME_COUNT}-frame sampling | checks off")
 
     with st.sidebar:
         st.header("Preset")
         with st.expander("Advanced", expanded=False):
             source_mode = st.radio("Source", ["Upload", "data/videos"], horizontal=True)
-            max_frames = st.select_slider("Frame cap", options=frame_options, value=DEFAULT_FRAME_COUNT)
+            max_frames = st.select_slider("Frame budget", options=frame_options, value=DEFAULT_FRAME_COUNT)
             dry_run = st.toggle("Dry run", value=dry_run)
             run_checks = st.toggle("Quality checks", value=False)
 
@@ -294,11 +285,22 @@ def main() -> None:
                 judge_model = st.text_input("Judge model", value=defaults.judge_model, disabled=dry_run)
 
         st.metric("Model", compact_model_name(model))
-        st.metric("Frame cap", max_frames)
-        st.metric("Length", f"{format_duration(MIN_VIDEO_SECONDS)}-{format_duration(MAX_VIDEO_SECONDS)}")
-        st.metric("Sampling", f"1/{DEFAULT_FRAME_INTERVAL_SECONDS:g}s")
+        st.metric("Frames", max_frames)
+        st.metric("Sampling", "Anchored")
+        st.metric(
+            "Duration",
+            f"{format_duration(MIN_VIDEO_DURATION_SECONDS)}-{format_duration(MAX_VIDEO_DURATION_SECONDS)}",
+        )
         st.metric("Checks", "On" if run_checks else "Off")
-        st.caption("Proxy connected" if proxy_url and backend == "Proxy" else "Direct API" if backend == "Direct Fireworks" else "Dry run")
+        st.caption(
+            "Dry run"
+            if dry_run
+            else "Proxy connected"
+            if proxy_url and backend == "Proxy"
+            else "Direct API"
+            if backend == "Direct Fireworks"
+            else "Backend not configured"
+        )
 
     input_col, run_col = st.columns([1.35, 0.65], gap="large")
     with input_col:
@@ -358,24 +360,6 @@ def main() -> None:
             st.warning("No supported video files found.")
             return
 
-        assets, skipped_assets = split_assets_by_duration(assets)
-        if skipped_assets:
-            skipped = ", ".join(
-                f"{asset.path.name} ({format_duration(duration)}, {reason})"
-                for asset, duration, reason in skipped_assets
-            )
-            st.warning(
-                f"Skipped videos outside {format_duration(MIN_VIDEO_SECONDS)}-"
-                f"{format_duration(MAX_VIDEO_SECONDS)}: {skipped}"
-            )
-
-        if not assets:
-            st.warning(
-                f"No videos between {format_duration(MIN_VIDEO_SECONDS)} and "
-                f"{format_duration(MAX_VIDEO_SECONDS)} to process."
-            )
-            return
-
         if not dry_run and backend == "Direct Fireworks" and not api_key:
             st.error("Fireworks API key is required.")
             return
@@ -406,17 +390,27 @@ def main() -> None:
         for index, asset in enumerate(assets, start=1):
             current.write(f"Processing {asset.video_id}")
             try:
+                duration = validate_video_duration(asset.path)
+                if duration is not None:
+                    current.write(f"Processing {asset.video_id} ({format_duration(duration)})")
                 if auto_transcribe and (force_transcribe or asset.transcript_path is None):
                     current.write(f"Transcribing {asset.video_id} with Whisper")
-                    asset = maybe_transcribe_asset(
-                        asset=asset,
-                        transcript_dir=transcript_dir,
-                        model_name=whisper_model,
-                        language=whisper_language,
-                        force=force_transcribe,
+                    with st.spinner(f"Whisper transcribing {asset.video_id}…"):
+                        future = transcribe_video_async(
+                            video_path=asset.path,
+                            transcript_dir=transcript_dir,
+                            model_name=whisper_model,
+                            language=whisper_language.strip() or None,
+                            force=force_transcribe,
+                        )
+                        transcript_path = future.result()  # blocks with spinner
+                    asset = VideoAsset(
+                        video_id=asset.video_id,
+                        path=asset.path,
+                        transcript_path=transcript_path,
                     )
                     current.write(f"Processing {asset.video_id}")
-                results.append(pipeline.process(asset))
+                results.append(strip_heavy_data(pipeline.process(asset)))
             except Exception as exc:
                 results.append(
                     {
@@ -427,7 +421,12 @@ def main() -> None:
                 )
             progress.progress(index / len(assets))
 
-        st.session_state.results = results
+        # Cap session state to avoid unbounded memory growth
+        existing = st.session_state.results
+        combined = existing + results
+        if len(combined) > MAX_SESSION_RESULTS:
+            combined = combined[-MAX_SESSION_RESULTS:]
+        st.session_state.results = combined
         LATEST_OUTPUT.write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
         st.rerun()
 
