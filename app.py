@@ -255,7 +255,7 @@ def main() -> None:
     st.title("Track 2 Caption Studio")
     st.caption(
         f"vision {compact_model_name(model)} -> captions {compact_model_name(caption_model)} | "
-        f"hybrid {DEFAULT_FRAME_COUNT}-frame sampling | checks off"
+        f"anchored {DEFAULT_FRAME_COUNT}-frame sampling | checks off"
     )
 
     with st.sidebar:
@@ -292,7 +292,7 @@ def main() -> None:
         st.metric("Vision", compact_model_name(model))
         st.metric("Caption", compact_model_name(caption_model))
         st.metric("Frames", max_frames)
-        st.metric("Sampling", "Hybrid")
+        st.metric("Sampling", "Anchored")
         st.metric(
             "Duration",
             f"{format_duration(MIN_VIDEO_DURATION_SECONDS)}-{format_duration(MAX_VIDEO_DURATION_SECONDS)}",

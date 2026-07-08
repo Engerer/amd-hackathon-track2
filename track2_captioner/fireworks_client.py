@@ -4,66 +4,19 @@ import base64
 import json
 import logging
 import mimetypes
-import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
 
-try:
-    from tenacity import (
-        retry,
-        retry_if_exception_type,
-        stop_after_attempt,
-        wait_exponential_jitter,
-        before_sleep_log,
-        RetryError,
-    )
-except ImportError:
-    class RetryError(Exception):
-        pass
-
-    def stop_after_attempt(attempts: int) -> int:
-        return attempts
-
-    def wait_exponential_jitter(*args: Any, **kwargs: Any) -> None:
-        return None
-
-    def before_sleep_log(*args: Any, **kwargs: Any) -> None:
-        return None
-
-    def retry_if_exception_type(exception_types: tuple[type[BaseException], ...] | type[BaseException]) -> tuple[type[BaseException], ...]:
-        if isinstance(exception_types, tuple):
-            return exception_types
-        return (exception_types,)
-
-    def retry(
-        stop: int = 1,
-        wait: Any = None,
-        retry: tuple[type[BaseException], ...] = (Exception,),
-        before_sleep: Any = None,
-        reraise: bool = True,
-    ) -> Any:
-        attempts = max(1, int(stop))
-
-        def decorator(func: Any) -> Any:
-            def wrapper(*args: Any, **kwargs: Any) -> Any:
-                last_error: BaseException | None = None
-                for attempt in range(attempts):
-                    try:
-                        return func(*args, **kwargs)
-                    except retry as exc:
-                        last_error = exc
-                        if attempt == attempts - 1:
-                            raise
-                        time.sleep(min(2 ** attempt, 8))
-                if last_error is not None:
-                    raise last_error
-                return func(*args, **kwargs)
-
-            return wrapper
-
-        return decorator
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential_jitter,
+    before_sleep_log,
+    RetryError,
+)
 
 logger = logging.getLogger(__name__)
 
