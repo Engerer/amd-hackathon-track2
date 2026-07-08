@@ -58,7 +58,7 @@ The caption calls use those observations only, so they are cheaper than sending 
 - Frame sampling: `1` frame every `3` seconds
 - Frame cap: `40` total frames per video
 - Frame width: `768px`
-- Whisper audio transcription: off by default
+- Whisper audio transcription: on by default in Docker with the `tiny` model
 - Internal judge checks: off by default
 - Fireworks key: stored in a Cloudflare Worker secret, not in the repo
 
@@ -148,7 +148,8 @@ $env:AUTO_TRANSCRIBE="true"
 $env:WHISPER_MODEL="base"
 ```
 
-For final submission, Whisper is off by default to keep runtime and Docker size smaller.
+The submitted Docker image installs Whisper and enables `AUTO_TRANSCRIBE=true` with `WHISPER_MODEL=tiny`.
+Videos without an audio stream skip Whisper and continue through the visual caption pipeline.
 
 ## Docker
 
@@ -228,7 +229,7 @@ TRACK2_MAX_FRAMES=40
 TRACK2_DRY_RUN=true
 RUN_CHECKS=true
 AUTO_TRANSCRIBE=true
-WHISPER_MODEL=base
+WHISPER_MODEL=tiny
 WHISPER_LANGUAGE=en
 MODEL_PROXY_URL=https://track2-fireworks-proxy.proxide-track2.workers.dev
 FIREWORKS_MODEL=accounts/fireworks/models/kimi-k2p6
@@ -238,7 +239,7 @@ Recommended final settings:
 
 ```text
 RUN_CHECKS=false
-AUTO_TRANSCRIBE=false
+AUTO_TRANSCRIBE=true
 TRACK2_MAX_FRAMES=40
 ```
 

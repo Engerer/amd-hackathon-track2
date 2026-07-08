@@ -21,10 +21,34 @@ def transcribe_video(
     if output_path.exists() and not force:
         return output_path
 
+    if not has_audio_stream(video_path):
+        output_path.write_text("", encoding="utf-8")
+        return output_path
+
     try:
         return _transcribe_with_python_whisper(video_path, output_path, model_name, language)
     except ImportError:
         return _transcribe_with_whisper_cli(video_path, transcript_dir, output_path, model_name, language)
+
+
+def has_audio_stream(video_path: Path) -> bool:
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "a",
+        "-show_entries",
+        "stream=index",
+        "-of",
+        "csv=p=0",
+        str(video_path),
+    ]
+    try:
+        result = subprocess.run(command, check=True, capture_output=True, text=True)
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return False
+    return bool(result.stdout.strip())
 
 
 def _transcribe_with_python_whisper(

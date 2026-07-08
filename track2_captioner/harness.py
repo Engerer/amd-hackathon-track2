@@ -102,14 +102,17 @@ def run_harness(input_path: Path, output_path: Path) -> int:
                 asset = VideoAsset(video_id=task_id, path=video_path, transcript_path=None)
 
                 if auto_transcribe:
-                    transcript_path = transcribe_video(
-                        video_path=video_path,
-                        transcript_dir=transcript_dir,
-                        model_name=whisper_model,
-                        language=whisper_language,
-                        force=force_transcribe,
-                    )
-                    asset = VideoAsset(video_id=task_id, path=video_path, transcript_path=transcript_path)
+                    try:
+                        transcript_path = transcribe_video(
+                            video_path=video_path,
+                            transcript_dir=transcript_dir,
+                            model_name=whisper_model,
+                            language=whisper_language,
+                            force=force_transcribe,
+                        )
+                        asset = VideoAsset(video_id=task_id, path=video_path, transcript_path=transcript_path)
+                    except Exception as exc:
+                        print(f"Task {task_id}: Whisper skipped: {exc}", file=sys.stderr)
 
                 processed = pipeline.process(asset, styles=styles)
                 captions = processed.get("captions", {})
