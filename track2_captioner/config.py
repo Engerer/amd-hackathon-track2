@@ -39,7 +39,7 @@ def load_settings() -> Settings:
     model = (
         os.getenv("FIREWORKS_MODEL")
         or (allowed_models[0] if allowed_models else None)
-        or "accounts/fireworks/models/kimi-k2p6"
+        or "accounts/fireworks/models/qwen3p7-plus"
     )
     caption_model = (
         os.getenv("FIREWORKS_CAPTION_MODEL", "").strip()
