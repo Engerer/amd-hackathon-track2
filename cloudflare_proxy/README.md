@@ -47,7 +47,9 @@ npx wrangler deploy
 ```text
 MODEL_PROXY_URL=https://track2-fireworks-proxy.<your-subdomain>.workers.dev
 FIREWORKS_API_KEY=
-FIREWORKS_MODEL=accounts/fireworks/models/kimi-k2p6
+FIREWORKS_MODEL=accounts/fireworks/models/qwen3p7-plus
+FIREWORKS_CAPTION_MODEL=accounts/fireworks/models/glm-5p2
+FIREWORKS_RERANK_MODEL=accounts/fireworks/models/glm-5p2
 ```
 
 ## Optional Proxy Token

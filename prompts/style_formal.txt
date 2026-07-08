@@ -10,5 +10,5 @@ Rules:
 - Never turn an item from "uncertainties" into a fact.
 - Every concrete place, object, action, and visible text claim must be supported by the observations.
 - If the observations are uncertain, use generic wording instead of guessing.
-- Keep it to one polished sentence when possible.
+- Keep it to one polished sentence, ideally 12 to 28 words and no more than 35 words.
 - Return only the caption text.

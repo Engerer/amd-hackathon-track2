@@ -31,12 +31,13 @@ video URL
  -> ffprobe checks duration
  -> ffmpeg extracts timeline anchor frames across the full clip
  -> resize each frame to 768px width
- -> Kimi K2.6 creates detailed factual observations from frames
- -> GLM 5.2 writes four style-specific captions from the observations
+ -> Qwen3.7 Plus creates detailed factual observations from frames
+ -> GLM 5.2 writes two candidates for each required style
+ -> GLM 5.2 reranks candidates for factual accuracy and style match
  -> Docker writes /output/results.json
 ```
 
-The first Kimi call receives image frames and creates observations:
+The first Qwen call receives image frames and creates observations:
 
 ```json
 {
@@ -52,12 +53,14 @@ The first Kimi call receives image frames and creates observations:
 }
 ```
 
-The caption calls use those observations only, so they are cheaper than sending frames again.
+The caption and judging calls use those observations only, so they are cheaper than sending frames again.
 
 ## Defaults
 
 - Vision model: `accounts/fireworks/models/kimi-k2p6`
-- Caption model: `accounts/fireworks/models/glm-5p2`
+- Caption models: `accounts/fireworks/models/deepseek-v4-pro`, `accounts/fireworks/models/glm-5p2`
+- Judge/rerank model: `accounts/fireworks/models/glm-5p2`
+- Caption flow: Kimi observations -> DeepSeek 4 captions + GLM 4 captions -> judge selects the final 4
 - Frame sampling: adaptive timeline anchor frames
 - Frame cap: `32` total frames per video
 - Frame width: `768px`
@@ -162,6 +165,12 @@ Build locally:
 docker build --build-arg MODEL_PROXY_URL=https://track2-fireworks-proxy.proxide-track2.workers.dev --build-arg FIREWORKS_MODEL=accounts/fireworks/models/kimi-k2p6 -t amd-track2-captioner:local .
 ```
 
+Fast no-Whisper beta build:
+
+```powershell
+docker build --build-arg MODEL_PROXY_URL=https://track2-fireworks-proxy.proxide-track2.workers.dev --build-arg INSTALL_WHISPER=false --build-arg AUTO_TRANSCRIBE=false -t amd-track2-captioner:local .
+```
+
 Run locally:
 
 ```powershell
@@ -236,14 +245,17 @@ WHISPER_MODEL=tiny
 WHISPER_LANGUAGE=en
 MODEL_PROXY_URL=https://track2-fireworks-proxy.proxide-track2.workers.dev
 FIREWORKS_MODEL=accounts/fireworks/models/kimi-k2p6
-FIREWORKS_CAPTION_MODEL=accounts/fireworks/models/glm-5p2
+FIREWORKS_CAPTION_MODEL=accounts/fireworks/models/deepseek-v4-pro
+FIREWORKS_CAPTION_MODELS=accounts/fireworks/models/deepseek-v4-pro,accounts/fireworks/models/glm-5p2
+FIREWORKS_RERANK_MODEL=accounts/fireworks/models/glm-5p2
+FIREWORKS_CAPTION_CANDIDATES=1
 ```
 
 Recommended final settings:
 
 ```text
 RUN_CHECKS=false
-AUTO_TRANSCRIBE=true
+AUTO_TRANSCRIBE=false
 TRACK2_MAX_FRAMES=32
 ```
 
@@ -294,5 +306,5 @@ The Fireworks API key is stored as a Cloudflare Worker secret.
 ## Known Issues
 
 - Gemma deployment currently fails with `payment method is required`.
-- GLM 5.2 and DeepSeek V4 do not support image input on Fireworks, so they cannot be the main video-understanding model. They can be used after Kimi turns frames into text observations.
+- GLM 5.2 and DeepSeek V4 do not support image input on Fireworks, so they cannot be the main video-understanding model. They can be used after Qwen turns frames into text observations.
 - Humor prompts can still invent small details; prompt tuning should focus on reducing hallucination.
