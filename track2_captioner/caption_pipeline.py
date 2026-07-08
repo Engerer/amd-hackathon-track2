@@ -232,7 +232,7 @@ class CaptionPipeline:
                 "Use only summary, setting, subjects, key_objects, actions, timeline, visible_text, and audio_or_speech as factual evidence.",
                 "Never turn anything in uncertainties into a fact.",
                 "If the exact location, identity, motive, or text is uncertain, use generic wording instead of guessing.",
-                "Never quote or name visible text, signs, brands, or organizations in the final caption; describe them generically if needed.",
+                "Do not quote visible text, signs, brand names, or organization names in the final caption unless the video would be hard to identify without it.",
                 "Do not invent hidden context such as deadlines, snacks, management, secrets, camera-operator motives, intentions, or what someone is probably doing.",
                 "Mention the main subject, setting, and primary action when supported.",
                 "Keep the final caption to one sentence, ideally 12 to 28 words and no more than 35 words.",
@@ -246,11 +246,8 @@ class CaptionPipeline:
         ]
         candidates = self._caption_candidates(style, observations, messages, temp)
         if len(candidates) == 1:
-            return self._sanitize_caption_text_claims(candidates[0], observations)
-        return self._sanitize_caption_text_claims(
-            self._rerank_caption(style, observations, candidates),
-            observations,
-        )
+            return candidates[0]
+        return self._rerank_caption(style, observations, candidates)
 
     def _caption_candidates(
         self,
@@ -316,7 +313,6 @@ class CaptionPipeline:
                 ]
                 response = self._caption_chat(retry_messages, max(0.2, temperature - 0.2))
                 caption = self._clean_caption(response)
-            caption = self._sanitize_caption_text_claims(caption, observations)
             if caption and caption not in candidates:
                 candidates.append(caption)
 
@@ -333,7 +329,7 @@ class CaptionPipeline:
                 "Pick the caption most likely to score highest with an LLM judge.",
                 "Factual accuracy is more important than humor.",
                 "Reject unsupported concrete details, guessed text, motives, speech, locations, identities, or hidden context.",
-                "Reject candidates that quote or name visible text, signs, brands, or organizations.",
+                "Strongly prefer candidates that avoid exact sign, brand, or organization names unless the video would be hard to identify without them.",
                 "Reject candidates that mention deadlines, snacks, management, secrets, intentions, or what someone is probably doing unless explicitly observed.",
                 "Prefer one-sentence captions between 12 and 28 words; reject wordy or multi-sentence candidates when a concise option is accurate.",
                 "Prefer concise captions that mention the main subject, setting, and action when supported.",
@@ -377,36 +373,6 @@ class CaptionPipeline:
     @staticmethod
     def _clean_caption(response: str) -> str:
         return response.strip().strip('"').strip()
-
-    @staticmethod
-    def _sanitize_caption_text_claims(caption: str, observations: dict[str, Any]) -> str:
-        cleaned = caption
-        all_caps_phrase = r"[A-Z][A-Z0-9&.'-]*(?:\s+[A-Z][A-Z0-9&.'-]*){1,7}"
-        label_words = r"sign|building|banner|logo|text"
-        cleaned = re.sub(
-            rf"\b(?:under|near|past|beside|outside|by|beneath|below|behind|around)\s+"
-            rf"(?:the\s+)?{all_caps_phrase}\s+({label_words})\b",
-            r"near a visible \1",
-            cleaned,
-        )
-        cleaned = re.sub(
-            rf"\b{all_caps_phrase}\s+({label_words})\b",
-            r"a visible \1",
-            cleaned,
-        )
-
-        visible_text = observations.get("visible_text", [])
-        if isinstance(visible_text, list):
-            for item in visible_text:
-                text = str(item).strip()
-                if len(text) < 4:
-                    continue
-                cleaned = re.sub(re.escape(text), "a visible sign", cleaned, flags=re.IGNORECASE)
-
-        cleaned = re.sub(r"\ba visible sign\s+(sign|building|banner|logo|text)\b", r"a visible \1", cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r"\s{2,}", " ", cleaned)
-        cleaned = re.sub(r"\s+([,.!?])", r"\1", cleaned)
-        return cleaned.strip()
 
     def _caption_chat(self, messages: list[dict[str, Any]], temperature: float) -> str:
         assert self.client is not None
