@@ -11,7 +11,9 @@ ENV MODEL_PROXY_URL=${MODEL_PROXY_URL} \
     FIREWORKS_MODEL=${FIREWORKS_MODEL} \
     FIREWORKS_CAPTION_MODEL=${FIREWORKS_CAPTION_MODEL} \
     FIREWORKS_JUDGE_MODEL=${FIREWORKS_MODEL} \
-    AUTO_TRANSCRIBE=true \
+    AUTO_TRANSCRIBE=false \
+    RUN_CHECKS=false \
+    TRACK2_MAX_FRAMES=12 \
     WHISPER_MODEL=tiny
 
 WORKDIR /app
@@ -20,7 +22,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-ARG INSTALL_WHISPER=true
+ARG INSTALL_WHISPER=false
 
 COPY requirements.txt requirements-whisper.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
