@@ -17,9 +17,6 @@ outputs/
 sample_output/
 docker_sample_output/
 docker_pushed_output/
-docker_nowhisper_output/
-docker_ensemble_output/
-ensemble_test_output/
 
 *.mp4
 *.mov

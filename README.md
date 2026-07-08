@@ -53,14 +53,14 @@ The first Qwen call receives image frames and creates observations:
 }
 ```
 
-The caption and judging calls use those observations only, so they are cheaper than sending frames again.
+The caption and reranking calls use those observations only, so they are cheaper than sending frames again.
 
 ## Defaults
 
-- Vision model: `accounts/fireworks/models/kimi-k2p6`
-- Caption models: `accounts/fireworks/models/deepseek-v4-pro`, `accounts/fireworks/models/glm-5p2`
-- Judge/rerank model: `accounts/fireworks/models/glm-5p2`
-- Caption flow: Kimi observations -> DeepSeek 4 captions + GLM 4 captions -> judge selects the final 4
+- Vision model: `accounts/fireworks/models/qwen3p7-plus`
+- Caption model: `accounts/fireworks/models/glm-5p2`
+- Rerank model: `accounts/fireworks/models/glm-5p2`
+- Caption candidates: `2` per style
 - Frame sampling: adaptive timeline anchor frames
 - Frame cap: `32` total frames per video
 - Frame width: `768px`
@@ -162,7 +162,7 @@ Videos without an audio stream skip Whisper and continue through the visual capt
 Build locally:
 
 ```powershell
-docker build --build-arg MODEL_PROXY_URL=https://track2-fireworks-proxy.proxide-track2.workers.dev --build-arg FIREWORKS_MODEL=accounts/fireworks/models/kimi-k2p6 -t amd-track2-captioner:local .
+docker build --build-arg MODEL_PROXY_URL=https://track2-fireworks-proxy.proxide-track2.workers.dev --build-arg FIREWORKS_MODEL=accounts/fireworks/models/qwen3p7-plus -t amd-track2-captioner:local .
 ```
 
 Fast no-Whisper beta build:
@@ -244,18 +244,17 @@ AUTO_TRANSCRIBE=true
 WHISPER_MODEL=tiny
 WHISPER_LANGUAGE=en
 MODEL_PROXY_URL=https://track2-fireworks-proxy.proxide-track2.workers.dev
-FIREWORKS_MODEL=accounts/fireworks/models/kimi-k2p6
-FIREWORKS_CAPTION_MODEL=accounts/fireworks/models/deepseek-v4-pro
-FIREWORKS_CAPTION_MODELS=accounts/fireworks/models/deepseek-v4-pro,accounts/fireworks/models/glm-5p2
+FIREWORKS_MODEL=accounts/fireworks/models/qwen3p7-plus
+FIREWORKS_CAPTION_MODEL=accounts/fireworks/models/glm-5p2
 FIREWORKS_RERANK_MODEL=accounts/fireworks/models/glm-5p2
-FIREWORKS_CAPTION_CANDIDATES=1
+FIREWORKS_CAPTION_CANDIDATES=2
 ```
 
 Recommended final settings:
 
 ```text
 RUN_CHECKS=false
-AUTO_TRANSCRIBE=false
+AUTO_TRANSCRIBE=true
 TRACK2_MAX_FRAMES=32
 ```
 
