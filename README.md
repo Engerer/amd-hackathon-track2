@@ -23,15 +23,15 @@ https://github.com/nish0203/amd-track2-captioner
 
 ## How It Works
 
-The pipeline samples timeline evidence instead of processing every video frame. By default it extracts evenly spaced anchor frames across the full clip, with a 32-frame safety cap for accuracy and runtime control.
+The pipeline samples timeline evidence instead of processing every video frame. By default it combines evenly spaced anchor frames with a smaller scene-change sample, keeps approximate timestamps for the observation prompt, and stays under a 32-frame safety cap for accuracy and runtime control.
 
 ```text
 video URL
  -> download video
  -> ffprobe checks duration
- -> ffmpeg extracts timeline anchor frames across the full clip
+ -> ffmpeg extracts timeline anchor frames plus scene-change frames
  -> resize each frame to 768px width
- -> Kimi K2.6 creates detailed factual observations from frames
+ -> Kimi K2.6 creates detailed factual observations from frames and frame timing metadata
  -> GLM 5.2 writes four style-specific captions from the observations
  -> Docker writes /output/results.json
 ```
@@ -58,14 +58,14 @@ The caption calls use those observations only, so they are cheaper than sending 
 
 - Vision model: `accounts/fireworks/models/kimi-k2p6`
 - Caption model: `accounts/fireworks/models/glm-5p2`
-- Frame sampling: adaptive timeline anchor frames
+- Frame sampling: adaptive anchor + scene-change frames
 - Frame cap: `32` total frames per video
 - Frame width: `768px`
 - Whisper audio transcription: on by default in Docker with the `tiny` model
 - Internal judge checks: off by default
 - Fireworks key: stored in a Cloudflare Worker secret, not in the repo
 
-Important: `32` is a safety cap, not 32 FPS. A 30-second video gives about 10 frames, and a 2-minute video gives up to 32 frames.
+Important: `32` is a safety cap, not 32 FPS. The harness can reduce the frame budget when the runtime deadline is tight.
 
 ## Quick Start
 
@@ -121,6 +121,26 @@ Check:
 
 ```text
 sample_output/results.json
+```
+
+Dry-run mode does not download remote videos, so it is safe for quick contract checks.
+
+Run the local test suite:
+
+```powershell
+.\.venv\Scripts\python -m unittest discover -s tests
+```
+
+Run the sample contract eval helper:
+
+```powershell
+.\.venv\Scripts\python scripts\eval_examples.py
+```
+
+To spend credits and call the configured backend, add `--real`:
+
+```powershell
+.\.venv\Scripts\python scripts\eval_examples.py --real
 ```
 
 ## Run The Real Local Harness
@@ -230,6 +250,9 @@ Useful variables:
 ```text
 TRACK2_MAX_FRAMES=32
 TRACK2_DRY_RUN=true
+TRACK2_RUNTIME_BUDGET_SECONDS=570
+TRACK2_DOWNLOAD_TIMEOUT_SECONDS=120
+TRACK2_TRANSCRIBE_MIN_REMAINING_SECONDS=150
 RUN_CHECKS=true
 AUTO_TRANSCRIBE=true
 WHISPER_MODEL=tiny
@@ -246,6 +269,15 @@ RUN_CHECKS=false
 AUTO_TRANSCRIBE=true
 TRACK2_MAX_FRAMES=32
 ```
+
+Cloudflare Worker proxy tuning:
+
+```text
+MAX_TOKENS=1000
+MAX_TEMPERATURE=0.9
+```
+
+The proxy forwards `response_format` so JSON-mode observation and judge calls stay reliable.
 
 ## Prompt Tuning
 
@@ -288,6 +320,7 @@ The Fireworks API key is stored as a Cloudflare Worker secret.
 - Container writes `/output/results.json`
 - JSON is valid
 - All four styles are present
+- Local dry-run contract eval passes
 - No hardcoded sample answers
 - Fireworks key is not exposed
 

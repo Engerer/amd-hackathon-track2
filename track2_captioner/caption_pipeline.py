@@ -11,7 +11,7 @@ from track2_captioner.config import Settings
 from track2_captioner.fireworks_client import FireworksClient, image_to_data_url
 from track2_captioner.json_tools import parse_json_object
 from track2_captioner.prompts import STYLE_PROMPTS, load_prompt
-from track2_captioner.video_ingest import DEFAULT_MAX_FRAMES, VideoAsset, extract_frames
+from track2_captioner.video_ingest import DEFAULT_MAX_FRAMES, FrameSample, VideoAsset, extract_frame_samples
 
 
 logger = logging.getLogger(__name__)
@@ -114,29 +114,43 @@ class CaptionPipeline:
     def process(self, asset: VideoAsset, styles: list[str] | None = None) -> dict[str, Any]:
         selected_styles = [style for style in (styles or list(STYLE_PROMPTS)) if style in STYLE_PROMPTS]
         frame_dir = self.work_dir / asset.video_id
-        frames = [] if self.dry_run else extract_frames(asset.path, frame_dir, self.max_frames)
+        frame_samples = [] if self.dry_run else extract_frame_samples(asset.path, frame_dir, self.max_frames)
         transcript = self._read_transcript(asset)
-        observations = self._observe(asset, frames, transcript)
+        observations = self._observe(asset, frame_samples, transcript)
         captions = self._captions(selected_styles, observations)
         checks = {}
         if self.run_checks:
             checks = self._run_checks_concurrent(selected_styles, observations, captions)
 
+        frames = [sample.path for sample in frame_samples]
+        sources = sorted({sample.source for sample in frame_samples})
         return {
             "video_id": asset.video_id,
             "source_path": str(asset.path),
             "frames": [str(frame) for frame in frames],
             "frame_count": len(frames),
-            "sampling_strategy": frames[0].parent.name if frames else "none",
+            "sampling_strategy": "+".join(sources) if sources else "none",
+            "frame_samples": [
+                {
+                    "path": str(sample.path),
+                    "timestamp_seconds": sample.timestamp_seconds,
+                    "source": sample.source,
+                }
+                for sample in frame_samples
+            ],
             "observations": observations,
             "captions": captions,
             "checks": checks,
         }
 
-    def _observe(self, asset: VideoAsset, frames: list[Path], transcript: str) -> dict[str, Any]:
+    def _observe(self, asset: VideoAsset, frames: list[FrameSample], transcript: str) -> dict[str, Any]:
         if self.dry_run:
             return dict(EMPTY_OBSERVATIONS)
 
+        frame_manifest = "\n".join(
+            f"{index}. {self._format_frame_time(frame.timestamp_seconds)} ({frame.source})"
+            for index, frame in enumerate(frames, start=1)
+        )
         content: list[dict[str, Any]] = [
             {
                 "type": "text",
@@ -144,9 +158,11 @@ class CaptionPipeline:
                     f"Video id: {asset.video_id}\n"
                     f"Optional transcript:\n{transcript or '[none provided]'}\n\n"
                     f"Analyze these {len(frames)} sampled frames in chronological order. "
+                    f"Frame metadata:\n{frame_manifest or '[none]'}\n\n"
                     "Capture exact visible facts that would help a judge compare captions: "
                     "setting, subjects, colors, countable objects, actions, scene changes, "
-                    "visible text, camera movement, and transcript-backed speech."
+                    "visible text, camera movement, and transcript-backed speech. "
+                    "Use the frame metadata only to describe temporal order or approximate timing."
                 ),
             }
         ]
@@ -154,7 +170,7 @@ class CaptionPipeline:
             content.append(
                 {
                     "type": "image_url",
-                    "image_url": {"url": image_to_data_url(frame)},
+                    "image_url": {"url": image_to_data_url(frame.path)},
                 }
             )
 
@@ -293,17 +309,33 @@ class CaptionPipeline:
         return text
 
     def _fallback_caption(self, style: str, observations: dict[str, Any]) -> str:
-        summary = str(observations.get("summary") or observations.get("setting") or "").strip()
+        summary = str(observations.get("summary") or "").strip()
+        setting = str(observations.get("setting") or "").strip()
         subjects = ", ".join(str(item) for item in observations.get("subjects", [])[:2])
         actions = ", ".join(str(item) for item in observations.get("actions", [])[:2])
+        details = ", ".join(str(item) for item in observations.get("key_objects", [])[:2])
         base = summary or f"The video shows {subjects or 'visible subjects'} with {actions or 'visible activity'}."
+        if setting and setting.lower() not in base.lower():
+            base = f"{base.rstrip('.')} in {setting}."
+        if details and details.lower() not in base.lower():
+            base = f"{base.rstrip('.')} with {details}."
         if style == "formal":
             return base
         if style == "sarcastic":
-            return f"{base} A very serious moment for ordinary visual evidence."
+            return f"{base} Clearly, ordinary visual evidence has never worked harder."
         if style == "humorous_tech":
             return f"{base} The scene ships its visual update with no rollback needed."
         return f"{base} It is doing its best to make everyday motion look eventful."
+
+    @staticmethod
+    def _format_frame_time(timestamp_seconds: float | None) -> str:
+        if timestamp_seconds is None:
+            return "time unknown"
+        minutes = int(timestamp_seconds // 60)
+        seconds = timestamp_seconds - (minutes * 60)
+        if minutes:
+            return f"about {minutes}m {seconds:.1f}s"
+        return f"about {seconds:.1f}s"
 
     def _check(self, style: str, observations: dict[str, Any], caption: str) -> dict[str, str]:
         if self.dry_run:

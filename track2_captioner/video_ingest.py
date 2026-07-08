@@ -29,6 +29,13 @@ class VideoAsset:
     transcript_path: Path | None
 
 
+@dataclass(frozen=True)
+class FrameSample:
+    path: Path
+    timestamp_seconds: float | None
+    source: str
+
+
 def discover_videos(input_dir: Path, transcript_dir: Path | None = None) -> list[VideoAsset]:
     if not input_dir.exists():
         return []
@@ -141,14 +148,25 @@ def _sample_timestamps(duration: float | None, max_frames: int) -> list[float]:
     return timestamps
 
 
-def _extract_anchor_frames(video_path: Path, frame_dir: Path, max_frames: int, width: int) -> list[Path]:
+def _sample_timestamp_for_index(duration: float | None, index: int, total: int) -> float | None:
+    if duration is None or duration <= 0 or total <= 0:
+        return None
+    if total == 1:
+        return round(duration / 2, 3)
+    start = min(0.5, max(duration * 0.05, 0))
+    end = max(duration - 0.5, start)
+    position = index / (total - 1)
+    return round(start + ((end - start) * position), 3)
+
+
+def _extract_anchor_samples(video_path: Path, frame_dir: Path, max_frames: int, width: int) -> list[FrameSample]:
     _reset_dir(frame_dir)
     duration = probe_duration_seconds(video_path)
     timestamps = _sample_timestamps(duration, max_frames)
     if not timestamps:
         return []
 
-    frames: list[Path] = []
+    frames: list[FrameSample] = []
     for index, timestamp in enumerate(timestamps, start=1):
         output_path = frame_dir / f"frame_{index:03d}.jpg"
         command = [
@@ -167,11 +185,11 @@ def _extract_anchor_frames(video_path: Path, frame_dir: Path, max_frames: int, w
             str(output_path),
         ]
         if _run_ffmpeg(command) and output_path.exists():
-            frames.append(output_path)
+            frames.append(FrameSample(output_path, timestamp, "anchor"))
     return frames
 
 
-def _extract_uniform_frames(video_path: Path, frame_dir: Path, max_frames: int, width: int) -> list[Path]:
+def _extract_uniform_samples(video_path: Path, frame_dir: Path, max_frames: int, width: int) -> list[FrameSample]:
     _reset_dir(frame_dir)
     duration = probe_duration_seconds(video_path)
 
@@ -196,11 +214,16 @@ def _extract_uniform_frames(video_path: Path, frame_dir: Path, max_frames: int, 
     ]
     if not _run_ffmpeg(command):
         return []
-    return sorted(frame_dir.glob("frame_*.jpg"))
+    paths = sorted(frame_dir.glob("frame_*.jpg"))
+    return [
+        FrameSample(path, _sample_timestamp_for_index(duration, index, len(paths)), "uniform")
+        for index, path in enumerate(paths)
+    ]
 
 
-def _extract_scene_frames(video_path: Path, frame_dir: Path, max_frames: int, width: int) -> list[Path]:
+def _extract_scene_samples(video_path: Path, frame_dir: Path, max_frames: int, width: int) -> list[FrameSample]:
     _reset_dir(frame_dir)
+    duration = probe_duration_seconds(video_path)
     output_pattern = frame_dir / "frame_%03d.jpg"
     command = [
         "ffmpeg",
@@ -219,7 +242,23 @@ def _extract_scene_frames(video_path: Path, frame_dir: Path, max_frames: int, wi
     ]
     if not _run_ffmpeg(command):
         return []
-    return sorted(frame_dir.glob("frame_*.jpg"))
+    paths = sorted(frame_dir.glob("frame_*.jpg"))
+    return [
+        FrameSample(path, _sample_timestamp_for_index(duration, index, len(paths)), "scene")
+        for index, path in enumerate(paths)
+    ]
+
+
+def _extract_anchor_frames(video_path: Path, frame_dir: Path, max_frames: int, width: int) -> list[Path]:
+    return [sample.path for sample in _extract_anchor_samples(video_path, frame_dir, max_frames, width)]
+
+
+def _extract_uniform_frames(video_path: Path, frame_dir: Path, max_frames: int, width: int) -> list[Path]:
+    return [sample.path for sample in _extract_uniform_samples(video_path, frame_dir, max_frames, width)]
+
+
+def _extract_scene_frames(video_path: Path, frame_dir: Path, max_frames: int, width: int) -> list[Path]:
+    return [sample.path for sample in _extract_scene_samples(video_path, frame_dir, max_frames, width)]
 
 
 def compute_dynamic_frame_count(duration_seconds: float | None, max_frames: int) -> int:
@@ -282,29 +321,62 @@ def deduplicate_frames(frame_paths: list[Path], threshold: int = 6) -> list[Path
     return kept
 
 
-def extract_frames(video_path: Path, frame_dir: Path, max_frames: int = DEFAULT_MAX_FRAMES, width: int = 768) -> list[Path]:
+def deduplicate_frame_samples(frame_samples: list[FrameSample], threshold: int = 6) -> list[FrameSample]:
+    kept_paths = set(deduplicate_frames([sample.path for sample in frame_samples], threshold))
+    return [sample for sample in frame_samples if sample.path in kept_paths]
+
+
+def _sort_samples(samples: list[FrameSample]) -> list[FrameSample]:
+    return sorted(
+        samples,
+        key=lambda sample: (
+            sample.timestamp_seconds is None,
+            sample.timestamp_seconds if sample.timestamp_seconds is not None else 0,
+            sample.path.name,
+        ),
+    )
+
+
+def extract_frame_samples(
+    video_path: Path,
+    frame_dir: Path,
+    max_frames: int = DEFAULT_MAX_FRAMES,
+    width: int = 768,
+) -> list[FrameSample]:
     frame_dir.mkdir(parents=True, exist_ok=True)
 
-    # Dynamic scaling: adapt frame budget to video duration
     duration = probe_duration_seconds(video_path)
     effective_max = compute_dynamic_frame_count(duration, max_frames)
 
-    minimum_frames = max(1, min(effective_max, 3))
-    anchor_frames = _extract_anchor_frames(video_path, frame_dir / "anchor", effective_max, width)
-    if len(anchor_frames) >= minimum_frames:
-        return anchor_frames
+    if effective_max <= 0:
+        return []
 
-    scene_frames = _extract_scene_frames(video_path, frame_dir / "scene", effective_max, width)
-    minimum_scene_frames = max(3, min(effective_max, effective_max // 2))
-    if len(scene_frames) >= minimum_scene_frames:
-        return deduplicate_frames(scene_frames)
+    anchor_budget = max(1, int(round(effective_max * 0.75)))
+    scene_budget = max(0, effective_max - anchor_budget)
+    anchor_samples = _extract_anchor_samples(video_path, frame_dir / "anchor", anchor_budget, width)
+    scene_samples = (
+        _extract_scene_samples(video_path, frame_dir / "scene", scene_budget, width)
+        if scene_budget
+        else []
+    )
 
-    uniform_frames = _extract_uniform_frames(video_path, frame_dir / "uniform", effective_max, width)
-    if uniform_frames:
-        return deduplicate_frames(uniform_frames)
+    combined = _sort_samples(anchor_samples + scene_samples)
+    combined = deduplicate_frame_samples(combined)
+    if len(combined) >= max(1, min(effective_max, 3)):
+        return combined[:effective_max]
 
-    if anchor_frames:
-        return deduplicate_frames(anchor_frames)
+    uniform_samples = _extract_uniform_samples(video_path, frame_dir / "uniform", effective_max, width)
+    if uniform_samples:
+        return deduplicate_frame_samples(uniform_samples)[:effective_max]
 
-    if not uniform_frames:
-        raise RuntimeError(f"Could not extract frames from {video_path}")
+    if combined:
+        return combined[:effective_max]
+
+    raise RuntimeError(f"Could not extract frames from {video_path}")
+
+
+def extract_frames(video_path: Path, frame_dir: Path, max_frames: int = DEFAULT_MAX_FRAMES, width: int = 768) -> list[Path]:
+    return [
+        sample.path
+        for sample in extract_frame_samples(video_path, frame_dir, max_frames=max_frames, width=width)
+    ]
