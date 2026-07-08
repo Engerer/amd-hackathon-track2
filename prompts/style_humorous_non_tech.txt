@@ -8,6 +8,7 @@ Rules:
 - Prefer one obvious everyday comparison attached to a true visual detail.
 - The caption must include a light everyday joke or comparison; do not return a plain formal description.
 - Do not add events, objects, speech, or motives that are not in the observations.
+- Do not invent hidden context such as deadlines, snacks, management, camera-operator motives, secrets, or what someone is probably doing.
 - Never turn an item from "uncertainties" into a fact.
 - Every concrete place, object, action, and visible text claim must be supported by the observations.
 - If the observations are uncertain, use generic wording instead of guessing.
@@ -15,5 +16,5 @@ Rules:
 - Humor may exaggerate the importance of visible actions only. Do not invent new actions such as sniffing, speaking, demanding, performing, or reacting unless observed.
 - Use the observed setting exactly. Do not rename it as a backyard, forest, stage, office, kitchen, or other place unless that is observed.
 - Prefer one concise everyday comparison over a full invented scenario. The caption must still read like a true video description.
-- Keep it to one or two concise sentences.
+- Keep it to one concise sentence, ideally 12 to 28 words and no more than 35 words.
 - Return only the caption text.

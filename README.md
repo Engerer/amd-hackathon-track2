@@ -32,7 +32,8 @@ video URL
  -> ffmpeg extracts timeline anchor frames across the full clip
  -> resize each frame to 768px width
  -> Qwen3.7 Plus creates detailed factual observations from frames
- -> GLM 5.2 writes four style-specific captions from the observations
+ -> GLM 5.2 writes two candidates for each required style
+ -> GLM 5.2 reranks candidates for factual accuracy and style match
  -> Docker writes /output/results.json
 ```
 
@@ -52,12 +53,14 @@ The first Qwen call receives image frames and creates observations:
 }
 ```
 
-The caption calls use those observations only, so they are cheaper than sending frames again.
+The caption and reranking calls use those observations only, so they are cheaper than sending frames again.
 
 ## Defaults
 
 - Vision model: `accounts/fireworks/models/qwen3p7-plus`
 - Caption model: `accounts/fireworks/models/glm-5p2`
+- Rerank model: `accounts/fireworks/models/glm-5p2`
+- Caption candidates: `2` per style
 - Frame sampling: adaptive timeline anchor frames
 - Frame cap: `32` total frames per video
 - Frame width: `768px`
@@ -237,6 +240,8 @@ WHISPER_LANGUAGE=en
 MODEL_PROXY_URL=https://track2-fireworks-proxy.proxide-track2.workers.dev
 FIREWORKS_MODEL=accounts/fireworks/models/qwen3p7-plus
 FIREWORKS_CAPTION_MODEL=accounts/fireworks/models/glm-5p2
+FIREWORKS_RERANK_MODEL=accounts/fireworks/models/glm-5p2
+FIREWORKS_CAPTION_CANDIDATES=2
 ```
 
 Recommended final settings:

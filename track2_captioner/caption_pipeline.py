@@ -34,6 +34,11 @@ CHECK_SCHEMA = json.dumps({
     "notes": "brief explanation",
 }, indent=2)
 
+RERANK_SCHEMA = json.dumps({
+    "winner": 1,
+    "reason": "brief reason the selected caption is best",
+}, indent=2)
+
 CREATIVE_STYLES = {"sarcastic", "humorous_tech", "humorous_non_tech"}
 TECH_STYLE_WORDS = {
     "api",
@@ -59,6 +64,22 @@ SARCASM_STYLE_MARKERS = {
     "obviously",
     "serious",
     "thrilling",
+}
+
+HIDDEN_CONTEXT_MARKERS = {
+    "probably",
+    "presumably",
+    "must be",
+    "management",
+    "deadline",
+    "operator",
+    "sensed",
+    "defusing",
+    "bomb",
+    "snack",
+    "treat",
+    "secret",
+    "forgot",
 }
 
 
@@ -211,7 +232,10 @@ class CaptionPipeline:
                 "Use only summary, setting, subjects, key_objects, actions, timeline, visible_text, and audio_or_speech as factual evidence.",
                 "Never turn anything in uncertainties into a fact.",
                 "If the exact location, identity, motive, or text is uncertain, use generic wording instead of guessing.",
+                "Do not quote visible text, signs, brand names, or organization names in the final caption unless the video would be hard to identify without it.",
+                "Do not invent hidden context such as deadlines, snacks, management, secrets, camera-operator motives, intentions, or what someone is probably doing.",
                 "Mention the main subject, setting, and primary action when supported.",
+                "Keep the final caption to one sentence, ideally 12 to 28 words and no more than 35 words.",
                 "Return only the final caption text.",
             ],
             "observations": observations,
@@ -220,22 +244,135 @@ class CaptionPipeline:
             {"role": "system", "content": prompt},
             {"role": "user", "content": json.dumps(caption_request, indent=2)},
         ]
-        response = self._caption_chat(messages, temp)
-        caption = response.strip().strip('"')
-        if self._needs_style_retry(style, caption):
-            retry_messages = messages + [
-                {
-                    "role": "user",
-                    "content": (
-                        "Rewrite the caption. It was too plain for the requested style. "
-                        "Keep the same observed facts, but make the target style obvious. "
-                        "Return only the rewritten caption text."
-                    ),
-                }
-            ]
-            response = self._caption_chat(retry_messages, temp)
-            caption = response.strip().strip('"')
-        return caption
+        candidates = self._caption_candidates(style, observations, messages, temp)
+        if len(candidates) == 1:
+            return candidates[0]
+        return self._rerank_caption(style, observations, candidates)
+
+    def _caption_candidates(
+        self,
+        style: str,
+        observations: dict[str, Any],
+        messages: list[dict[str, Any]],
+        temperature: float,
+    ) -> list[str]:
+        candidates: list[str] = []
+        for candidate_index in range(self.settings.caption_candidates):
+            candidate_messages = list(messages)
+            if candidates:
+                candidate_messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Write a different valid candidate for the same style. "
+                            "Keep it grounded in the same observations. "
+                            "Avoid repeating these previous candidates:\n"
+                            f"{json.dumps(candidates, indent=2)}"
+                        ),
+                    }
+                )
+            response = self._caption_chat(candidate_messages, temperature)
+            caption = self._clean_caption(response)
+            if self._needs_style_retry(style, caption):
+                retry_messages = candidate_messages + [
+                    {
+                        "role": "user",
+                        "content": (
+                            "Rewrite the caption. It was too plain for the requested style. "
+                            "Keep the same observed facts, but make the target style obvious. "
+                            "Return only the rewritten caption text."
+                        ),
+                    }
+                ]
+                response = self._caption_chat(retry_messages, temperature)
+                caption = self._clean_caption(response)
+            if self._needs_grounding_retry(caption):
+                retry_messages = candidate_messages + [
+                    {
+                        "role": "user",
+                        "content": (
+                            "Rewrite the caption to remove unsupported hidden context. "
+                            "Do not mention deadlines, snacks, management, secrets, camera-operator motives, or what someone is probably doing. "
+                            "Keep the requested style obvious, but use only visible or audible evidence. "
+                            "Return only the rewritten caption text."
+                        ),
+                    }
+                ]
+                response = self._caption_chat(retry_messages, max(0.2, temperature - 0.2))
+                caption = self._clean_caption(response)
+            if self._needs_length_retry(caption):
+                retry_messages = candidate_messages + [
+                    {
+                        "role": "user",
+                        "content": (
+                            "Rewrite the caption as one concise sentence of 12 to 28 words. "
+                            "Keep the target style obvious and preserve only observed facts. "
+                            "Return only the rewritten caption text."
+                        ),
+                    }
+                ]
+                response = self._caption_chat(retry_messages, max(0.2, temperature - 0.2))
+                caption = self._clean_caption(response)
+            if caption and caption not in candidates:
+                candidates.append(caption)
+
+        if not candidates:
+            candidates.append(self._fallback_caption(style, observations))
+        return candidates
+
+    def _rerank_caption(self, style: str, observations: dict[str, Any], candidates: list[str]) -> str:
+        assert self.client is not None
+        rerank_request = {
+            "target_style": style,
+            "style_requirement": STYLE_DESCRIPTIONS.get(style, ""),
+            "selection_rules": [
+                "Pick the caption most likely to score highest with an LLM judge.",
+                "Factual accuracy is more important than humor.",
+                "Reject unsupported concrete details, guessed text, motives, speech, locations, identities, or hidden context.",
+                "Strongly prefer candidates that avoid exact sign, brand, or organization names unless the video would be hard to identify without them.",
+                "Reject candidates that mention deadlines, snacks, management, secrets, intentions, or what someone is probably doing unless explicitly observed.",
+                "Prefer one-sentence captions between 12 and 28 words; reject wordy or multi-sentence candidates when a concise option is accurate.",
+                "Prefer concise captions that mention the main subject, setting, and action when supported.",
+                "For sarcastic and humorous styles, the style must be obvious but still grounded.",
+                "Return strict JSON only.",
+            ],
+            "observations": observations,
+            "candidates": [
+                {"id": index, "caption": caption}
+                for index, caption in enumerate(candidates, start=1)
+            ],
+            "response_schema": RERANK_SCHEMA,
+        }
+        try:
+            response = self.client.chat(
+                self.settings.rerank_model,
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a strict video-caption reranker. "
+                            "Choose the single best candidate for factual accuracy and target style. "
+                            "Do not rewrite the caption."
+                        ),
+                    },
+                    {"role": "user", "content": json.dumps(rerank_request, indent=2)},
+                ],
+                max_tokens=self.settings.rerank_max_tokens,
+                temperature=0.0,
+                reasoning_effort=self.settings.reasoning_effort,
+                json_mode=True,
+            )
+            parsed = parse_json_object(response)
+            winner = int(parsed.get("winner", 1))
+            if 1 <= winner <= len(candidates):
+                return candidates[winner - 1]
+        except Exception:
+            logger.warning("Caption reranking failed for style %s.", style, exc_info=True)
+        return candidates[0]
+
+    @staticmethod
+    def _clean_caption(response: str) -> str:
+        return response.strip().strip('"').strip()
 
     def _caption_chat(self, messages: list[dict[str, Any]], temperature: float) -> str:
         assert self.client is not None
@@ -272,6 +409,17 @@ class CaptionPipeline:
         if style == "sarcastic":
             return not any(marker in normalized for marker in SARCASM_STYLE_MARKERS)
         return False
+
+    @staticmethod
+    def _needs_grounding_retry(caption: str) -> bool:
+        normalized = caption.lower()
+        return any(marker in normalized for marker in HIDDEN_CONTEXT_MARKERS)
+
+    @staticmethod
+    def _needs_length_retry(caption: str) -> bool:
+        words = re.findall(r"\b[\w'-]+\b", caption)
+        sentence_count = len(re.findall(r"[.!?]+", caption))
+        return len(words) > 35 or sentence_count > 1
 
     @staticmethod
     def _sanitize_observations(observations: dict[str, Any]) -> dict[str, Any]:
