@@ -37,8 +37,8 @@ STYLE_LABELS = {
     "humorous_tech": "Humorous-tech",
     "humorous_non_tech": "Humorous non-tech",
 }
-DEFAULT_FRAME_COUNT = 10
-FRAME_OPTIONS = [5, 8, 10, 12, 16]
+DEFAULT_FRAME_COUNT = 32
+FRAME_OPTIONS = [10, 16, 24, 32]
 MAX_SESSION_RESULTS = 20
 
 
@@ -249,10 +249,14 @@ def main() -> None:
     proxy_url = defaults.proxy_url
     proxy_token = defaults.proxy_token
     model = defaults.model
+    caption_model = defaults.caption_model
     judge_model = defaults.judge_model
 
     st.title("Track 2 Caption Studio")
-    st.caption(f"{compact_model_name(model)} | anchored {DEFAULT_FRAME_COUNT}-frame sampling | checks off")
+    st.caption(
+        f"vision {compact_model_name(model)} -> captions {compact_model_name(caption_model)} | "
+        f"anchored {DEFAULT_FRAME_COUNT}-frame sampling | checks off"
+    )
 
     with st.sidebar:
         st.header("Preset")
@@ -280,11 +284,13 @@ def main() -> None:
             else:
                 api_key = st.text_input("Fireworks API key", value=api_key, type="password", disabled=dry_run)
 
-            model = st.text_input("Caption model", value=defaults.model, disabled=dry_run)
+            model = st.text_input("Vision model", value=defaults.model, disabled=dry_run)
+            caption_model = st.text_input("Style caption model", value=defaults.caption_model, disabled=dry_run)
             if run_checks:
                 judge_model = st.text_input("Judge model", value=defaults.judge_model, disabled=dry_run)
 
-        st.metric("Model", compact_model_name(model))
+        st.metric("Vision", compact_model_name(model))
+        st.metric("Caption", compact_model_name(caption_model))
         st.metric("Frames", max_frames)
         st.metric("Sampling", "Anchored")
         st.metric(
@@ -371,6 +377,7 @@ def main() -> None:
         settings = Settings(
             api_key=api_key if backend == "Direct Fireworks" else "",
             model=model,
+            caption_model=caption_model,
             judge_model=judge_model,
             base_url=defaults.base_url,
             proxy_url=proxy_url if backend == "Proxy" else "",

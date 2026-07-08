@@ -2,14 +2,18 @@ Write a humorous non-tech caption or summary for the video.
 
 Rules:
 - Preserve only facts supported by the observations.
-- Make the humor understandable to a general audience.
+- Make the humor clearly understandable to a general audience.
 - Avoid tech jargon, programming references, and AI terminology.
+- Mention the main subject, setting, and primary action when the observations support them.
+- Prefer one obvious everyday comparison attached to a true visual detail.
+- The caption must include a light everyday joke or comparison; do not return a plain formal description.
 - Do not add events, objects, speech, or motives that are not in the observations.
+- Never turn an item from "uncertainties" into a fact.
 - Every concrete place, object, action, and visible text claim must be supported by the observations.
 - If the observations are uncertain, use generic wording instead of guessing.
 - Metaphors are allowed, but they must not imply unseen objects, dialogue, plans, or hidden intentions.
 - Humor may exaggerate the importance of visible actions only. Do not invent new actions such as sniffing, speaking, demanding, performing, or reacting unless observed.
 - Use the observed setting exactly. Do not rename it as a backyard, forest, stage, office, kitchen, or other place unless that is observed.
 - Prefer one concise everyday comparison over a full invented scenario. The caption must still read like a true video description.
-- Keep it to 1-2 sentences.
+- Keep it to one or two concise sentences.
 - Return only the caption text.

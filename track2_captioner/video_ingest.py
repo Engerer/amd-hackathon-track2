@@ -14,7 +14,7 @@ VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
 MIN_VIDEO_DURATION_SECONDS = 30.0
 MAX_VIDEO_DURATION_SECONDS = 120.0
 DURATION_TOLERANCE_SECONDS = 0.5
-ABSOLUTE_MAX_FRAMES = 16
+ABSOLUTE_MAX_FRAMES = 32
 DEFAULT_MAX_FRAMES = ABSOLUTE_MAX_FRAMES
 
 
@@ -223,16 +223,16 @@ def _extract_scene_frames(video_path: Path, frame_dir: Path, max_frames: int, wi
 
 
 def compute_dynamic_frame_count(duration_seconds: float | None, max_frames: int) -> int:
-    """Scale frame count by video duration to avoid token blowout on short videos."""
+    """Scale frame count by video duration while preserving enough evidence for judging."""
     cap = min(max_frames, ABSOLUTE_MAX_FRAMES)
     if duration_seconds is None or duration_seconds <= 0:
         return cap
     if duration_seconds <= 30:
-        return min(6, cap)
-    if duration_seconds <= 60:
         return min(10, cap)
+    if duration_seconds <= 60:
+        return min(18, cap)
     if duration_seconds <= 90:
-        return min(12, cap)
+        return min(24, cap)
     return cap
 
 
@@ -282,7 +282,7 @@ def deduplicate_frames(frame_paths: list[Path], threshold: int = 6) -> list[Path
     return kept
 
 
-def extract_frames(video_path: Path, frame_dir: Path, max_frames: int = 10, width: int = 768) -> list[Path]:
+def extract_frames(video_path: Path, frame_dir: Path, max_frames: int = DEFAULT_MAX_FRAMES, width: int = 768) -> list[Path]:
     frame_dir.mkdir(parents=True, exist_ok=True)
 
     # Dynamic scaling: adapt frame budget to video duration
@@ -292,7 +292,7 @@ def extract_frames(video_path: Path, frame_dir: Path, max_frames: int = 10, widt
     minimum_frames = max(1, min(effective_max, 3))
     anchor_frames = _extract_anchor_frames(video_path, frame_dir / "anchor", effective_max, width)
     if len(anchor_frames) >= minimum_frames:
-        return deduplicate_frames(anchor_frames)
+        return anchor_frames
 
     scene_frames = _extract_scene_frames(video_path, frame_dir / "scene", effective_max, width)
     minimum_scene_frames = max(3, min(effective_max, effective_max // 2))

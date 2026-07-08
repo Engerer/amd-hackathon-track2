@@ -23,16 +23,16 @@ https://github.com/nish0203/amd-track2-captioner
 
 ## How It Works
 
-The pipeline samples frames instead of processing every video frame. By default it extracts one timeline frame every 3 seconds, capped at 40 frames for cost and runtime control.
+The pipeline samples timeline evidence instead of processing every video frame. By default it extracts evenly spaced anchor frames across the full clip, with a 32-frame safety cap for accuracy and runtime control.
 
 ```text
 video URL
  -> download video
  -> ffprobe checks duration
- -> ffmpeg extracts one frame every 3 seconds
+ -> ffmpeg extracts timeline anchor frames across the full clip
  -> resize each frame to 768px width
- -> Kimi K2.6 creates factual observations
- -> Kimi K2.6 writes four styled captions
+ -> Kimi K2.6 creates detailed factual observations from frames
+ -> GLM 5.2 writes four style-specific captions from the observations
  -> Docker writes /output/results.json
 ```
 
@@ -40,10 +40,12 @@ The first Kimi call receives image frames and creates observations:
 
 ```json
 {
+  "summary": "...",
   "setting": "...",
   "subjects": ["..."],
+  "key_objects": ["..."],
   "actions": ["..."],
-  "sequence": ["beginning", "middle", "end"],
+  "timeline": ["beginning: ...", "middle: ...", "end: ..."],
   "visible_text": ["..."],
   "audio_or_speech": ["..."],
   "uncertainties": ["..."]
@@ -54,15 +56,16 @@ The caption calls use those observations only, so they are cheaper than sending 
 
 ## Defaults
 
-- Model: `accounts/fireworks/models/kimi-k2p6`
-- Frame sampling: `1` frame every `3` seconds
-- Frame cap: `40` total frames per video
+- Vision model: `accounts/fireworks/models/kimi-k2p6`
+- Caption model: `accounts/fireworks/models/glm-5p2`
+- Frame sampling: adaptive timeline anchor frames
+- Frame cap: `32` total frames per video
 - Frame width: `768px`
 - Whisper audio transcription: on by default in Docker with the `tiny` model
 - Internal judge checks: off by default
 - Fireworks key: stored in a Cloudflare Worker secret, not in the repo
 
-Important: `40` is a safety cap, not 40 FPS. A 30-second video gives about 10 frames, and a 2-minute video gives about 40 frames.
+Important: `32` is a safety cap, not 32 FPS. A 30-second video gives about 10 frames, and a 2-minute video gives up to 32 frames.
 
 ## Quick Start
 
@@ -225,7 +228,7 @@ Example output:
 Useful variables:
 
 ```text
-TRACK2_MAX_FRAMES=40
+TRACK2_MAX_FRAMES=32
 TRACK2_DRY_RUN=true
 RUN_CHECKS=true
 AUTO_TRANSCRIBE=true
@@ -233,6 +236,7 @@ WHISPER_MODEL=tiny
 WHISPER_LANGUAGE=en
 MODEL_PROXY_URL=https://track2-fireworks-proxy.proxide-track2.workers.dev
 FIREWORKS_MODEL=accounts/fireworks/models/kimi-k2p6
+FIREWORKS_CAPTION_MODEL=accounts/fireworks/models/glm-5p2
 ```
 
 Recommended final settings:
@@ -240,7 +244,7 @@ Recommended final settings:
 ```text
 RUN_CHECKS=false
 AUTO_TRANSCRIBE=true
-TRACK2_MAX_FRAMES=40
+TRACK2_MAX_FRAMES=32
 ```
 
 ## Prompt Tuning
@@ -290,5 +294,5 @@ The Fireworks API key is stored as a Cloudflare Worker secret.
 ## Known Issues
 
 - Gemma deployment currently fails with `payment method is required`.
-- DeepSeek V4 does not support image input, so it cannot be the main video-understanding model.
+- GLM 5.2 and DeepSeek V4 do not support image input on Fireworks, so they cannot be the main video-understanding model. They can be used after Kimi turns frames into text observations.
 - Humor prompts can still invent small details; prompt tuning should focus on reducing hallucination.

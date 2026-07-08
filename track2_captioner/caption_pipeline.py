@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -9,14 +11,18 @@ from track2_captioner.config import Settings
 from track2_captioner.fireworks_client import FireworksClient, image_to_data_url
 from track2_captioner.json_tools import parse_json_object
 from track2_captioner.prompts import STYLE_PROMPTS, load_prompt
-from track2_captioner.video_ingest import VideoAsset, extract_frames
+from track2_captioner.video_ingest import DEFAULT_MAX_FRAMES, VideoAsset, extract_frames
 
+
+logger = logging.getLogger(__name__)
 
 OBSERVATION_SCHEMA = json.dumps({
-    "setting": "one concise sentence",
+    "summary": "one factual overview sentence",
+    "setting": "where the video appears to take place",
     "subjects": ["visible subject or object"],
+    "key_objects": ["important visible objects, colors, signs, or environmental details"],
     "actions": ["important visible action"],
-    "sequence": ["what happens first", "what happens next", "what happens last"],
+    "timeline": ["beginning: ...", "middle: ...", "end: ..."],
     "visible_text": ["text visible in frames, or empty array"],
     "audio_or_speech": ["relevant transcript or audio cue, or empty array"],
     "uncertainties": ["anything unclear or ambiguous, or empty array"],
@@ -29,13 +35,40 @@ CHECK_SCHEMA = json.dumps({
 }, indent=2)
 
 CREATIVE_STYLES = {"sarcastic", "humorous_tech", "humorous_non_tech"}
+TECH_STYLE_WORDS = {
+    "api",
+    "bug",
+    "cache",
+    "commit",
+    "debug",
+    "deploy",
+    "latency",
+    "log",
+    "pipeline",
+    "queue",
+    "rollback",
+    "runtime",
+    "scheduler",
+}
+SARCASM_STYLE_MARKERS = {
+    "apparently",
+    "because",
+    "clearly",
+    "naturally",
+    "of course",
+    "obviously",
+    "serious",
+    "thrilling",
+}
 
 
 EMPTY_OBSERVATIONS = {
+    "summary": "Dry run placeholder summary.",
     "setting": "Dry run placeholder setting.",
     "subjects": ["sample subject"],
+    "key_objects": ["sample object"],
     "actions": ["sample action"],
-    "sequence": ["sample beginning", "sample middle", "sample ending"],
+    "timeline": ["beginning: sample start", "middle: sample middle", "end: sample ending"],
     "visible_text": [],
     "audio_or_speech": [],
     "uncertainties": ["Dry run did not inspect the video."],
@@ -62,7 +95,7 @@ class CaptionPipeline:
         settings: Settings,
         work_dir: Path,
         dry_run: bool = False,
-        max_frames: int = 10,
+        max_frames: int = DEFAULT_MAX_FRAMES,
         run_checks: bool = True,
     ) -> None:
         self.settings = settings
@@ -110,7 +143,10 @@ class CaptionPipeline:
                 "text": (
                     f"Video id: {asset.video_id}\n"
                     f"Optional transcript:\n{transcript or '[none provided]'}\n\n"
-                    f"Analyze these {len(frames)} sampled frames in chronological order."
+                    f"Analyze these {len(frames)} sampled frames in chronological order. "
+                    "Capture exact visible facts that would help a judge compare captions: "
+                    "setting, subjects, colors, countable objects, actions, scene changes, "
+                    "visible text, camera movement, and transcript-backed speech."
                 ),
             }
         ]
@@ -134,58 +170,27 @@ class CaptionPipeline:
             reasoning_effort=self.settings.reasoning_effort,
             json_mode=True,
         )
-        return self._parse_or_repair_json(response, "perception observations", OBSERVATION_SCHEMA)
+        observations = self._parse_or_repair_json(response, "perception observations", OBSERVATION_SCHEMA)
+        return self._sanitize_observations(observations)
 
     def _captions(self, styles: list[str], observations: dict[str, Any]) -> dict[str, str]:
         if self.dry_run:
             return {style: DRY_RUN_CAPTIONS[style] for style in styles}
 
-        requested = {style: STYLE_DESCRIPTIONS[style] for style in styles}
-        prompt_payload = {
-            "task": "Write one video caption or summary for each requested style.",
-            "rules": [
-                "Use only facts supported by the observations.",
-                "Do not add events, objects, speech, motives, identities, or hidden context.",
-                "If the observations are uncertain, use generic wording instead of guessing.",
-                "Each caption must be in English and 1-2 sentences.",
-                "Return strict JSON only, with exactly the requested style keys.",
-            ],
-            "requested_styles": requested,
-            "observations": observations,
-            "output_shape": {style: "caption text" for style in styles},
-        }
-
-        assert self.client is not None
-        caption_schema = json.dumps({style: "caption text" for style in styles}, indent=2)
-        response = self.client.chat(
-            self.settings.model,
-            [
-                {
-                    "role": "system",
-                    "content": (
-                        "You write concise, faithful video captions in multiple styles. "
-                        "Return only a valid JSON object."
-                    ),
-                },
-                {"role": "user", "content": json.dumps(prompt_payload, indent=2)},
-            ],
-            max_tokens=self.settings.max_tokens,
-            temperature=self.settings.temperature,
-            reasoning_effort=self.settings.reasoning_effort,
-            json_mode=True,
-        )
-        parsed = self._parse_or_repair_json(response, "caption JSON", caption_schema)
         captions: dict[str, str] = {}
-        missing: list[str] = []
-        for style in styles:
-            caption = parsed.get(style)
-            if isinstance(caption, str) and caption.strip():
-                captions[style] = caption.strip().strip('"')
-            else:
-                missing.append(style)
-
-        if missing:
-            raise ValueError(f"Model response missed requested styles: {', '.join(missing)}")
+        workers = min(len(styles), 4)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            future_to_style = {
+                pool.submit(self._caption, style, observations): style
+                for style in styles
+            }
+            for future in as_completed(future_to_style):
+                style = future_to_style[future]
+                try:
+                    captions[style] = future.result()
+                except Exception:
+                    logger.warning("Caption generation failed for style %s.", style, exc_info=True)
+                    captions[style] = self._fallback_caption(style, observations)
         return captions
 
     def _caption(self, style: str, observations: dict[str, Any]) -> str:
@@ -199,17 +204,106 @@ class CaptionPipeline:
             if style in CREATIVE_STYLES
             else self.settings.temperature
         )
-        response = self.client.chat(
-            self.settings.model,
-            [
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": json.dumps(observations, indent=2)},
+        caption_request = {
+            "target_style": style,
+            "style_requirement": STYLE_DESCRIPTIONS.get(style, ""),
+            "strict_grounding_rules": [
+                "Use only summary, setting, subjects, key_objects, actions, timeline, visible_text, and audio_or_speech as factual evidence.",
+                "Never turn anything in uncertainties into a fact.",
+                "If the exact location, identity, motive, or text is uncertain, use generic wording instead of guessing.",
+                "Mention the main subject, setting, and primary action when supported.",
+                "Return only the final caption text.",
             ],
-            max_tokens=self.settings.caption_max_tokens,
-            temperature=temp,
-            reasoning_effort=self.settings.reasoning_effort,
-        )
-        return response.strip().strip('"')
+            "observations": observations,
+        }
+        messages = [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": json.dumps(caption_request, indent=2)},
+        ]
+        response = self._caption_chat(messages, temp)
+        caption = response.strip().strip('"')
+        if self._needs_style_retry(style, caption):
+            retry_messages = messages + [
+                {
+                    "role": "user",
+                    "content": (
+                        "Rewrite the caption. It was too plain for the requested style. "
+                        "Keep the same observed facts, but make the target style obvious. "
+                        "Return only the rewritten caption text."
+                    ),
+                }
+            ]
+            response = self._caption_chat(retry_messages, temp)
+            caption = response.strip().strip('"')
+        return caption
+
+    def _caption_chat(self, messages: list[dict[str, Any]], temperature: float) -> str:
+        assert self.client is not None
+        try:
+            return self.client.chat(
+                self.settings.caption_model,
+                messages,
+                max_tokens=self.settings.caption_max_tokens,
+                temperature=temperature,
+                reasoning_effort=self.settings.reasoning_effort,
+            )
+        except Exception:
+            if self.settings.caption_model == self.settings.model:
+                raise
+            logger.warning(
+                "Caption model %s failed; falling back to %s.",
+                self.settings.caption_model,
+                self.settings.model,
+                exc_info=True,
+            )
+            return self.client.chat(
+                self.settings.model,
+                messages,
+                max_tokens=self.settings.caption_max_tokens,
+                temperature=temperature,
+                reasoning_effort=self.settings.reasoning_effort,
+            )
+
+    @staticmethod
+    def _needs_style_retry(style: str, caption: str) -> bool:
+        normalized = caption.lower()
+        if style == "humorous_tech":
+            return not any(word in normalized for word in TECH_STYLE_WORDS)
+        if style == "sarcastic":
+            return not any(marker in normalized for marker in SARCASM_STYLE_MARKERS)
+        return False
+
+    @staticmethod
+    def _sanitize_observations(observations: dict[str, Any]) -> dict[str, Any]:
+        cleaned = dict(observations)
+        uncertainties = cleaned.get("uncertainties")
+        if isinstance(uncertainties, list):
+            cleaned["uncertainties"] = [
+                CaptionPipeline._sanitize_uncertainty(str(item))
+                for item in uncertainties
+            ]
+        return cleaned
+
+    @staticmethod
+    def _sanitize_uncertainty(text: str) -> str:
+        lowered = text.lower()
+        if "exact city" in lowered or "exact location" in lowered:
+            if any(marker in lowered for marker in ("suggest", "may be", "might be", "probably", "looks like")):
+                return re.split(r"\bthough\b|\bbut\b|;|,", text, maxsplit=1, flags=re.IGNORECASE)[0].strip() + "."
+        return text
+
+    def _fallback_caption(self, style: str, observations: dict[str, Any]) -> str:
+        summary = str(observations.get("summary") or observations.get("setting") or "").strip()
+        subjects = ", ".join(str(item) for item in observations.get("subjects", [])[:2])
+        actions = ", ".join(str(item) for item in observations.get("actions", [])[:2])
+        base = summary or f"The video shows {subjects or 'visible subjects'} with {actions or 'visible activity'}."
+        if style == "formal":
+            return base
+        if style == "sarcastic":
+            return f"{base} A very serious moment for ordinary visual evidence."
+        if style == "humorous_tech":
+            return f"{base} The scene ships its visual update with no rollback needed."
+        return f"{base} It is doing its best to make everyday motion look eventful."
 
     def _check(self, style: str, observations: dict[str, Any], caption: str) -> dict[str, str]:
         if self.dry_run:

@@ -2,14 +2,19 @@ Write a humorous-tech caption or summary for the video.
 
 Rules:
 - Preserve only facts supported by the observations.
-- Make the humor understandable to developers or tech people.
+- Make the humor clearly understandable to developers or tech people.
 - You may use light references to bugs, latency, deploys, logs, prompts, APIs, or debugging.
+- Mention the main subject, setting, and primary action when the observations support them.
+- Prefer one obvious tech metaphor attached to a true visual detail.
+- The caption must include at least one clear tech reference such as queue, deploy, debug, API, latency, log, cache, scheduler, pipeline, rollback, commit, runtime, or bug.
+- Do not return a plain formal description.
 - Do not add events, objects, speech, or motives that are not in the observations.
+- Never turn an item from "uncertainties" into a fact.
 - Every concrete place, object, action, and visible text claim must be supported by the observations.
 - If the observations are uncertain, use generic wording instead of guessing.
 - Metaphors are allowed, but they must not imply unseen objects, dialogue, plans, or hidden intentions.
 - Humor may exaggerate the importance of visible actions only. Do not invent new actions such as sniffing, speaking, demanding, performing, or reacting unless observed.
 - Use the observed setting exactly. Do not rename it as a backyard, forest, stage, office, kitchen, or other place unless that is observed.
 - Prefer one concise tech metaphor over a full invented scenario. The caption must still read like a true video description.
-- Keep it to 1-2 sentences.
+- Keep it to one or two concise sentences.
 - Return only the caption text.

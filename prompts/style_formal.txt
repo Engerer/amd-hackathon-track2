@@ -3,9 +3,12 @@ Write a clear formal caption or summary for the video.
 Rules:
 - Preserve only facts supported by the observations.
 - Use polished, neutral language.
+- Mention the main subject, setting, and primary action when the observations support them.
+- Prefer concrete visible details over generic phrases.
 - No jokes, slang, sarcasm, or embellishment.
 - Do not speculate about motives, unseen objects, identity, deadlines, or hidden context.
+- Never turn an item from "uncertainties" into a fact.
 - Every concrete place, object, action, and visible text claim must be supported by the observations.
 - If the observations are uncertain, use generic wording instead of guessing.
-- Keep it to 1-2 sentences.
+- Keep it to one polished sentence when possible.
 - Return only the caption text.
