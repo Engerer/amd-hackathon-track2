@@ -14,6 +14,7 @@ from track2_captioner.harness import (
     read_tasks,
     run_harness,
 )
+from track2_captioner.transcription import format_timestamp, format_transcript
 
 
 class HarnessContractTests(unittest.TestCase):
@@ -74,6 +75,23 @@ class HarnessContractTests(unittest.TestCase):
         self.assertEqual(adaptive_frame_budget(32, remaining_seconds=120, tasks_left=1), 12)
         self.assertEqual(adaptive_frame_budget(32, remaining_seconds=250, tasks_left=2), 18)
         self.assertEqual(adaptive_frame_budget(32, remaining_seconds=500, tasks_left=2), 32)
+
+    def test_whisper_transcript_includes_segment_timestamps(self) -> None:
+        transcript = format_transcript(
+            {
+                "text": "hello world",
+                "segments": [
+                    {"start": 1.25, "end": 3.5, "text": "hello"},
+                    {"start": 65.0, "end": 67.25, "text": "world"},
+                ],
+            }
+        )
+
+        self.assertEqual(transcript, "00:01.2-00:03.5: hello\n01:05.0-01:07.2: world\n")
+
+    def test_whisper_transcript_falls_back_to_plain_text(self) -> None:
+        self.assertEqual(format_transcript({"text": "plain transcript"}), "plain transcript\n")
+        self.assertEqual(format_timestamp(0), "00:00.0")
 
 
 if __name__ == "__main__":

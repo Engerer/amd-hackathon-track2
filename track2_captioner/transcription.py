@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import functools
+import json
 import shutil
 import subprocess
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 
 WHISPER_MODELS = ["tiny", "base", "small", "medium", "large"]
@@ -97,8 +99,7 @@ def _transcribe_with_python_whisper(
     if language:
         options["language"] = language
     result = model.transcribe(str(video_path), **options)
-    text = str(result.get("text", "")).strip()
-    output_path.write_text(text + "\n", encoding="utf-8")
+    output_path.write_text(format_transcript(result), encoding="utf-8")
     return output_path
 
 
@@ -116,13 +117,14 @@ def _transcribe_with_whisper_cli(
             "pip install -r requirements-whisper.txt"
         )
 
+    json_path = transcript_dir / f"{video_path.stem}.json"
     command = [
         whisper_command,
         str(video_path),
         "--model",
         model_name,
         "--output_format",
-        "txt",
+        "json",
         "--output_dir",
         str(transcript_dir),
     ]
@@ -130,6 +132,48 @@ def _transcribe_with_whisper_cli(
         command.extend(["--language", language])
 
     subprocess.run(command, check=True, capture_output=True, text=True)
+    if json_path.exists():
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+        output_path.write_text(format_transcript(payload), encoding="utf-8")
+        return output_path
+
     if not output_path.exists():
         raise RuntimeError(f"Whisper finished but did not create {output_path}")
     return output_path
+
+
+def format_transcript(result: dict[str, Any]) -> str:
+    segments = result.get("segments")
+    if isinstance(segments, list) and segments:
+        lines = []
+        for segment in segments:
+            if not isinstance(segment, dict):
+                continue
+            text = str(segment.get("text", "")).strip()
+            if not text:
+                continue
+            start = _coerce_seconds(segment.get("start"))
+            end = _coerce_seconds(segment.get("end"))
+            if start is None or end is None:
+                lines.append(text)
+            else:
+                lines.append(f"{format_timestamp(start)}-{format_timestamp(end)}: {text}")
+        if lines:
+            return "\n".join(lines) + "\n"
+
+    text = str(result.get("text", "")).strip()
+    return text + ("\n" if text else "")
+
+
+def format_timestamp(seconds: float) -> str:
+    total_seconds = max(0.0, seconds)
+    minutes = int(total_seconds // 60)
+    remainder = total_seconds - (minutes * 60)
+    return f"{minutes:02d}:{remainder:04.1f}"
+
+
+def _coerce_seconds(value: object) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None

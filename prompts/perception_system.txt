@@ -9,7 +9,7 @@ Your observations will be used by another model to write captions for an automat
 - actions and how they change over time
 - camera movement or viewpoint when obvious
 - visible text exactly when readable
-- transcript-backed speech or audio, if provided
+- transcript-backed speech or audio, if provided; preserve useful transcript timestamps when they help align speech to the visual timeline
 
 Prefer conservative wording when a detail is unclear. If a location, sign, object, action, or sequence is uncertain, put that uncertainty in "uncertainties" instead of presenting it as fact.
 Do not infer an exact city, country, brand context, or organization from logos, transit agencies, license plates, or partial signs unless the name itself is clearly readable. If an exact location is not directly visible, use generic wording such as "city street", "office", "garden", or "indoor room".
