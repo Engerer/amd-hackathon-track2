@@ -165,12 +165,6 @@ Build locally:
 docker build --build-arg MODEL_PROXY_URL=https://track2-fireworks-proxy.proxide-track2.workers.dev --build-arg FIREWORKS_MODEL=accounts/fireworks/models/qwen3p7-plus -t amd-track2-captioner:local .
 ```
 
-Fast no-Whisper beta build:
-
-```powershell
-docker build --build-arg MODEL_PROXY_URL=https://track2-fireworks-proxy.proxide-track2.workers.dev --build-arg INSTALL_WHISPER=false --build-arg AUTO_TRANSCRIBE=false -t amd-track2-captioner:local .
-```
-
 Run locally:
 
 ```powershell
