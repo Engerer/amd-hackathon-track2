@@ -157,7 +157,6 @@ Remove-Item Env:TRACK2_INPUT,Env:TRACK2_OUTPUT
 ## Optional Whisper
 
 Whisper can transcribe video audio and pass the transcript into the caption pipeline.
-When Whisper returns segment metadata, transcripts are saved with time ranges so Kimi can align speech to the sampled visual timeline.
 
 Install optional dependencies:
 
