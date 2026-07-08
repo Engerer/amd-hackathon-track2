@@ -31,12 +31,12 @@ video URL
  -> ffprobe checks duration
  -> ffmpeg extracts timeline anchor frames across the full clip
  -> resize each frame to 768px width
- -> Qwen3.7 Plus creates detailed factual observations from frames
+ -> Kimi K2.6 creates detailed factual observations from frames
  -> GLM 5.2 writes four style-specific captions from the observations
  -> Docker writes /output/results.json
 ```
 
-The first Qwen call receives image frames and creates observations:
+The first Kimi call receives image frames and creates observations:
 
 ```json
 {
@@ -56,7 +56,7 @@ The caption calls use those observations only, so they are cheaper than sending 
 
 ## Defaults
 
-- Vision model: `accounts/fireworks/models/qwen3p7-plus`
+- Vision model: `accounts/fireworks/models/kimi-k2p6`
 - Caption model: `accounts/fireworks/models/glm-5p2`
 - Frame sampling: adaptive timeline anchor frames
 - Frame cap: `32` total frames per video
@@ -159,7 +159,7 @@ Videos without an audio stream skip Whisper and continue through the visual capt
 Build locally:
 
 ```powershell
-docker build --build-arg MODEL_PROXY_URL=https://track2-fireworks-proxy.proxide-track2.workers.dev --build-arg FIREWORKS_MODEL=accounts/fireworks/models/qwen3p7-plus -t amd-track2-captioner:local .
+docker build --build-arg MODEL_PROXY_URL=https://track2-fireworks-proxy.proxide-track2.workers.dev --build-arg FIREWORKS_MODEL=accounts/fireworks/models/kimi-k2p6 -t amd-track2-captioner:local .
 ```
 
 Run locally:
@@ -235,7 +235,7 @@ AUTO_TRANSCRIBE=true
 WHISPER_MODEL=tiny
 WHISPER_LANGUAGE=en
 MODEL_PROXY_URL=https://track2-fireworks-proxy.proxide-track2.workers.dev
-FIREWORKS_MODEL=accounts/fireworks/models/qwen3p7-plus
+FIREWORKS_MODEL=accounts/fireworks/models/kimi-k2p6
 FIREWORKS_CAPTION_MODEL=accounts/fireworks/models/glm-5p2
 ```
 
@@ -294,5 +294,5 @@ The Fireworks API key is stored as a Cloudflare Worker secret.
 ## Known Issues
 
 - Gemma deployment currently fails with `payment method is required`.
-- GLM 5.2 and DeepSeek V4 do not support image input on Fireworks, so they cannot be the main video-understanding model. They can be used after Qwen turns frames into text observations.
+- GLM 5.2 and DeepSeek V4 do not support image input on Fireworks, so they cannot be the main video-understanding model. They can be used after Kimi turns frames into text observations.
 - Humor prompts can still invent small details; prompt tuning should focus on reducing hallucination.
