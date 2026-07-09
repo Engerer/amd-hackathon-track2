@@ -3,7 +3,7 @@ FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-ARG MODEL_PROXY_URL=""
+ARG MODEL_PROXY_URL="https://track2-fireworks-proxy.proxide-track2.workers.dev"
 ARG FIREWORKS_MODEL="accounts/fireworks/models/qwen3p7-plus"
 ARG FIREWORKS_CAPTION_MODEL="accounts/fireworks/models/qwen3p7-plus"
 
