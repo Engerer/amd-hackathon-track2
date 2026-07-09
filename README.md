@@ -12,13 +12,13 @@ The agent captions each video in four required styles:
 Submission image:
 
 ```text
-somnuskai/amd-track2-captioner:latest
+engeraaa/amd-track2-captioner:latest
 ```
 
 GitHub repo:
 
 ```text
-https://github.com/nish0203/amd-track2-captioner
+https://github.com/Engerer/amd-hackathon-track2
 ```
 
 ## How It Works
@@ -31,33 +31,31 @@ video URL
  -> ffprobe checks duration
  -> OpenCV scores candidate frames for motion, scene change, sharpness, brightness, and diversity
  -> resize each frame to 768px width
- -> Kimi K2.6 creates detailed factual observations from frames
- -> GLM 5.2 writes all requested style captions from the observations in one batched call
+ -> Qwen3.7 Plus receives the sampled frames directly
+ -> Qwen3.7 Plus writes all requested style captions in one multimodal JSON call
  -> Docker writes /output/results.json
 ```
 
-The first Kimi call receives image frames and creates observations:
+The Qwen3.7 call receives image frames and returns captions directly:
 
 ```json
 {
-  "summary": "...",
-  "setting": "...",
-  "subjects": ["..."],
-  "key_objects": ["..."],
-  "actions": ["..."],
-  "timeline": ["beginning: ...", "middle: ...", "end: ..."],
-  "visible_text": ["..."],
-  "audio_or_speech": ["..."],
-  "uncertainties": ["..."]
+  "captions": {
+    "formal": "...",
+    "sarcastic": "...",
+    "humorous_tech": "...",
+    "humorous_non_tech": "..."
+  },
+  "visual_facts": ["brief factual details used for grounding"]
 }
 ```
 
-The caption call uses those observations only, so it is cheaper than sending frames again. If one style is missing or too weak, the pipeline retries only one style to protect the 10-minute runtime.
+If one style is missing or too weak, the pipeline retries a direct multimodal repair call with the frames again while protecting the 10-minute runtime.
 
 ## Defaults
 
-- Vision model: `accounts/fireworks/models/kimi-k2p6`
-- Caption model: `accounts/fireworks/models/glm-5p2`
+- Direct multimodal model: `accounts/fireworks/models/qwen3p7-plus`
+- Caption model setting: also `accounts/fireworks/models/qwen3p7-plus` for compatibility
 - Frame sampling: adaptive OpenCV candidate selection
 - Frame cap: `18` total frames per video by default, hard-capped at `20`
 - Frame width: `768px`
@@ -72,8 +70,8 @@ Important: `18` is a safety cap, not 18 FPS. A 30-45 second video gives up to 14
 Clone the repo:
 
 ```powershell
-git clone https://github.com/nish0203/amd-track2-captioner.git
-cd amd-track2-captioner
+git clone https://github.com/Engerer/amd-hackathon-track2.git
+cd amd-hackathon-track2
 ```
 
 Create the Python environment:
@@ -159,7 +157,7 @@ Videos without an audio stream skip Whisper and continue through the visual capt
 Build locally:
 
 ```powershell
-docker build --build-arg MODEL_PROXY_URL=https://track2-fireworks-proxy.proxide-track2.workers.dev --build-arg FIREWORKS_MODEL=accounts/fireworks/models/kimi-k2p6 -t amd-track2-captioner:local .
+docker build --build-arg MODEL_PROXY_URL=https://track2-fireworks-proxy.proxide-track2.workers.dev --build-arg FIREWORKS_MODEL=accounts/fireworks/models/qwen3p7-plus -t amd-track2-captioner:local .
 ```
 
 Run locally:
@@ -171,14 +169,14 @@ docker run --rm -v "${PWD}\sample_input:/input:ro" -v "${PWD}\docker_sample_outp
 Push final image:
 
 ```powershell
-docker tag amd-track2-captioner:local somnuskai/amd-track2-captioner:latest
-docker push somnuskai/amd-track2-captioner:latest
+docker tag amd-track2-captioner:local engeraaa/amd-track2-captioner:latest
+docker push engeraaa/amd-track2-captioner:latest
 ```
 
 Public submission image:
 
 ```text
-somnuskai/amd-track2-captioner:latest
+engeraaa/amd-track2-captioner:latest
 ```
 
 ## Hackathon I/O Contract
@@ -239,8 +237,8 @@ AUTO_TRANSCRIBE=false
 WHISPER_MODEL=tiny
 WHISPER_LANGUAGE=en
 MODEL_PROXY_URL=https://track2-fireworks-proxy.proxide-track2.workers.dev
-FIREWORKS_MODEL=accounts/fireworks/models/kimi-k2p6
-FIREWORKS_CAPTION_MODEL=accounts/fireworks/models/glm-5p2
+FIREWORKS_MODEL=accounts/fireworks/models/qwen3p7-plus
+FIREWORKS_CAPTION_MODEL=accounts/fireworks/models/qwen3p7-plus
 ```
 
 Recommended final settings:
@@ -300,5 +298,5 @@ The Fireworks API key is stored as a Cloudflare Worker secret.
 ## Known Issues
 
 - Gemma deployment currently fails with `payment method is required`.
-- GLM 5.2 and DeepSeek V4 do not support image input on Fireworks, so they cannot be the main video-understanding model. They can be used after Kimi turns frames into text observations.
+- This version assumes `qwen3p7-plus` accepts image inputs on the configured Fireworks endpoint.
 - Humor prompts can still invent small details; prompt tuning should focus on reducing hallucination.

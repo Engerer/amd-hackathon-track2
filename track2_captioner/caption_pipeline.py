@@ -17,16 +17,14 @@ from track2_captioner.video_ingest import DEFAULT_FRAME_PROFILE, DEFAULT_MAX_FRA
 
 logger = logging.getLogger(__name__)
 
-OBSERVATION_SCHEMA = json.dumps({
-    "summary": "one factual overview sentence",
-    "setting": "where the video appears to take place",
-    "subjects": ["visible subject or object"],
-    "key_objects": ["important visible objects, colors, signs, or environmental details"],
-    "actions": ["important visible action"],
-    "timeline": ["beginning: ...", "middle: ...", "end: ..."],
-    "visible_text": ["text visible in frames, or empty array"],
-    "audio_or_speech": ["relevant transcript or audio cue, or empty array"],
-    "uncertainties": ["anything unclear or ambiguous, or empty array"],
+CAPTION_SCHEMA = json.dumps({
+    "captions": {
+        "formal": "formal caption when requested",
+        "sarcastic": "sarcastic caption when requested",
+        "humorous_tech": "humorous technology caption when requested",
+        "humorous_non_tech": "humorous non-technical caption when requested",
+    },
+    "visual_facts": ["brief factual details used for grounding"],
 }, indent=2)
 
 CHECK_SCHEMA = json.dumps({
@@ -35,13 +33,47 @@ CHECK_SCHEMA = json.dumps({
     "notes": "brief explanation",
 }, indent=2)
 
-HUMOR_NON_TECH_WORDS = {
-    "like", "honestly", "basically", "seems", "looks", "feels", "maybe", 
-    "perhaps", "probably", "instead", "trying", "somehow", "manage", "actually",
-    "except", "meanwhile", "wondering", "guess", "typical", "classic", "standard"
-}
+DIRECT_CAPTION_SYSTEM = (
+    "You are a direct multimodal video captioning agent. "
+    "Inspect the sampled video frames in chronological order and generate final captions directly. "
+    "Do not write an intermediate observation report. Return strict JSON only."
+)
 
-CREATIVE_STYLES = {"sarcastic", "humorous_tech", "humorous_non_tech"}
+HUMOR_NON_TECH_WORDS = {
+    "actually",
+    "apparently",
+    "basically",
+    "classic",
+    "except",
+    "feels",
+    "guess",
+    "honestly",
+    "like",
+    "manage",
+    "meanwhile",
+    "seems",
+    "somehow",
+    "standard",
+    "trying",
+    "typical",
+}
+NON_TECH_FORBIDDEN_WORDS = {
+    "api",
+    "bug",
+    "cache",
+    "code",
+    "debug",
+    "deploy",
+    "latency",
+    "log",
+    "pipeline",
+    "prompt",
+    "queue",
+    "rollback",
+    "runtime",
+    "scheduler",
+    "server",
+}
 TECH_STYLE_WORDS = {
     "api",
     "bug",
@@ -68,17 +100,16 @@ SARCASM_STYLE_MARKERS = {
     "thrilling",
 }
 
-
 EMPTY_OBSERVATIONS = {
-    "summary": "Dry run placeholder summary.",
-    "setting": "Dry run placeholder setting.",
-    "subjects": ["sample subject"],
-    "key_objects": ["sample object"],
-    "actions": ["sample action"],
-    "timeline": ["beginning: sample start", "middle: sample middle", "end: sample ending"],
+    "summary": "Direct multimodal captioning did not run.",
+    "setting": "unknown",
+    "subjects": [],
+    "key_objects": [],
+    "actions": [],
+    "timeline": [],
     "visible_text": [],
     "audio_or_speech": [],
-    "uncertainties": ["Dry run did not inspect the video."],
+    "uncertainties": ["Dry run or fallback did not inspect the video."],
 }
 
 DRY_RUN_CAPTIONS = {
@@ -90,8 +121,8 @@ DRY_RUN_CAPTIONS = {
 
 STYLE_DESCRIPTIONS = {
     "formal": "Professional, objective, factual tone. No jokes, slang, sarcasm, or embellishment.",
-    "sarcastic": "Dry, ironic, lightly mocking tone while staying true to the observed video.",
-    "humorous_tech": "Funny with technology or programming references, but still grounded in the observations.",
+    "sarcastic": "Dry, ironic, lightly mocking tone while staying true to the visible video.",
+    "humorous_tech": "Funny with technology or programming references, while staying grounded in the frames.",
     "humorous_non_tech": "Funny everyday humor for a general audience, with no technical jargon.",
 }
 
@@ -133,6 +164,7 @@ class CaptionPipeline:
         started_at = time.monotonic()
         timings: dict[str, float] = {}
         selected_styles = [style for style in (styles or list(STYLE_PROMPTS)) if style in STYLE_PROMPTS]
+
         frame_dir = self.work_dir / asset.video_id
         frame_started_at = time.monotonic()
         frames = [] if self.dry_run else extract_frames(
@@ -142,30 +174,33 @@ class CaptionPipeline:
             frame_profile=frame_profile,
         )
         timings["frame_extraction_sec"] = time.monotonic() - frame_started_at
+
         transcript = self._read_transcript(asset)
-        observe_started_at = time.monotonic()
-        observations = self._observe(asset, frames, transcript)
-        timings["vision_observation_sec"] = time.monotonic() - observe_started_at
         caption_started_at = time.monotonic()
         if force_fallback_captions or (
             caption_fallback_deadline is not None
             and time.monotonic() >= caption_fallback_deadline
         ):
+            observations = dict(EMPTY_OBSERVATIONS)
             captions = {
                 style: self._fallback_caption(style, observations)
                 for style in selected_styles
             }
         else:
-            captions = self._captions(
-                selected_styles,
-                observations,
+            captions, observations = self._direct_captions(
+                asset=asset,
+                frames=frames,
+                transcript=transcript,
+                styles=selected_styles,
                 enable_style_retry=(
                     self.enable_style_retry
                     if enable_style_retry is None
                     else enable_style_retry
                 ),
             )
+        timings["vision_observation_sec"] = 0.0
         timings["caption_generation_sec"] = time.monotonic() - caption_started_at
+
         checks = {}
         if self.run_checks:
             check_started_at = time.monotonic()
@@ -185,21 +220,82 @@ class CaptionPipeline:
             "timings": timings,
         }
 
-    def _observe(self, asset: VideoAsset, frames: list[Path], transcript: str) -> dict[str, Any]:
+    def _direct_captions(
+        self,
+        asset: VideoAsset,
+        frames: list[Path],
+        transcript: str,
+        styles: list[str],
+        enable_style_retry: bool,
+    ) -> tuple[dict[str, str], dict[str, Any]]:
         if self.dry_run:
-            return dict(EMPTY_OBSERVATIONS)
+            return {style: DRY_RUN_CAPTIONS[style] for style in styles}, dict(EMPTY_OBSERVATIONS)
 
+        assert self.client is not None
+        content = self._direct_caption_content(asset, frames, transcript, styles)
+        response = self.client.chat(
+            self.settings.model,
+            [
+                {"role": "system", "content": DIRECT_CAPTION_SYSTEM},
+                {"role": "user", "content": content},
+            ],
+            max_tokens=self.settings.caption_max_tokens,
+            temperature=self.settings.creative_temperature,
+            reasoning_effort=self.settings.reasoning_effort,
+            json_mode=True,
+        )
+        parsed = self._parse_or_repair_json(response, "direct multimodal captions", CAPTION_SCHEMA)
+        observations = self._observations_from_direct_response(parsed)
+        raw_captions = self._extract_caption_map(styles, parsed)
+        captions = self._sanitize_caption_map(styles, raw_captions, observations)
+
+        if enable_style_retry:
+            issues = self._caption_issues(styles, raw_captions)
+            if issues:
+                captions = self._retry_direct_captions(asset, frames, transcript, styles, captions, issues)
+                observations = self._observations_from_direct_response({
+                    "captions": captions,
+                    "visual_facts": observations.get("key_objects", []),
+                })
+
+        return captions, observations
+
+    def _direct_caption_content(
+        self,
+        asset: VideoAsset,
+        frames: list[Path],
+        transcript: str,
+        styles: list[str],
+    ) -> list[dict[str, Any]]:
+        style_requirements = {
+            style: STYLE_DESCRIPTIONS[style]
+            for style in styles
+            if style in STYLE_DESCRIPTIONS
+        }
+        request = {
+            "video_id": asset.video_id,
+            "task": "Generate final captions directly from the provided frames.",
+            "requested_styles": style_requirements,
+            "optional_transcript": transcript or "[none provided]",
+            "rules": [
+                "Use the frames as the primary source of truth.",
+                "Write every caption in English.",
+                "Treat frames as chronological samples from one video.",
+                "Mention the main subject, setting, and primary action when visible.",
+                "Use only visible or transcript-backed facts; do not invent motives, identities, locations, speech, or hidden context.",
+                "Never turn uncertainty into a concrete claim.",
+                "Each caption should be one concise sentence, ideally 12 to 30 words.",
+                "For humorous_tech, include a clear tech reference such as API, bug, debug, deploy, latency, log, cache, pipeline, queue, rollback, runtime, or scheduler.",
+                "For humorous_non_tech, avoid all tech, programming, AI, prompt, model, server, and software jargon.",
+                "Return captions only for the requested styles.",
+                "Return strict JSON matching the schema.",
+            ],
+            "response_schema": CAPTION_SCHEMA,
+        }
         content: list[dict[str, Any]] = [
             {
                 "type": "text",
-                "text": (
-                    f"Video id: {asset.video_id}\n"
-                    f"Optional transcript:\n{transcript or '[none provided]'}\n\n"
-                    f"Analyze these {len(frames)} sampled frames in chronological order. "
-                    "Capture exact visible facts that would help a judge compare captions: "
-                    "setting, subjects, colors, countable objects, actions, scene changes, "
-                    "visible text, camera movement, and transcript-backed speech."
-                ),
+                "text": json.dumps(request, indent=2),
             }
         ]
         for frame in frames:
@@ -209,110 +305,128 @@ class CaptionPipeline:
                     "image_url": {"url": image_to_data_url(frame)},
                 }
             )
+        return content
 
+    def _retry_direct_captions(
+        self,
+        asset: VideoAsset,
+        frames: list[Path],
+        transcript: str,
+        styles: list[str],
+        current_captions: dict[str, str],
+        issues: list[str],
+    ) -> dict[str, str]:
         assert self.client is not None
+        repair_request = {
+            "video_id": asset.video_id,
+            "task": "Repair the direct video captions using the frames again.",
+            "issues": issues,
+            "current_captions": current_captions,
+            "requested_styles": {
+                style: STYLE_DESCRIPTIONS[style]
+                for style in styles
+                if style in STYLE_DESCRIPTIONS
+            },
+            "optional_transcript": transcript or "[none provided]",
+            "rules": [
+                "Keep only visible or transcript-backed facts.",
+                "Write every caption in English.",
+                "Fix only missing, weakly styled, overlong, or jargon-violating captions.",
+                "Return one concise caption for every requested style.",
+                "Return strict JSON matching the schema.",
+            ],
+            "response_schema": CAPTION_SCHEMA,
+        }
+        content: list[dict[str, Any]] = [{"type": "text", "text": json.dumps(repair_request, indent=2)}]
+        for frame in frames:
+            content.append({"type": "image_url", "image_url": {"url": image_to_data_url(frame)}})
+
         response = self.client.chat(
             self.settings.model,
             [
-                {"role": "system", "content": load_prompt("perception_system.txt")},
+                {"role": "system", "content": DIRECT_CAPTION_SYSTEM},
                 {"role": "user", "content": content},
             ],
-            max_tokens=self.settings.max_tokens,
-            temperature=self.settings.temperature,
+            max_tokens=self.settings.caption_max_tokens,
+            temperature=max(0.2, self.settings.creative_temperature - 0.2),
             reasoning_effort=self.settings.reasoning_effort,
             json_mode=True,
         )
-        observations = self._parse_or_repair_json(response, "perception observations", OBSERVATION_SCHEMA)
-        return self._sanitize_observations(observations)
+        parsed = self._parse_or_repair_json(response, "direct caption repair", CAPTION_SCHEMA)
+        repaired = self._extract_caption_map(styles, parsed)
+        merged = dict(current_captions)
+        merged.update({style: caption for style, caption in repaired.items() if caption})
+        return self._sanitize_caption_map(styles, merged, self._observations_from_direct_response(parsed))
 
-    def _captions(
-        self,
-        styles: list[str],
-        observations: dict[str, Any],
-        enable_style_retry: bool = True,
-    ) -> dict[str, str]:
-        if self.dry_run:
-            return {style: DRY_RUN_CAPTIONS[style] for style in styles}
+    @staticmethod
+    def _extract_caption_map(styles: list[str], parsed: dict[str, Any]) -> dict[str, str]:
+        payload = parsed.get("captions", parsed)
+        if not isinstance(payload, dict):
+            return {}
 
         captions: dict[str, str] = {}
-        workers = min(len(styles), 4)
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            future_to_style = {
-                pool.submit(self._caption, style, observations, enable_style_retry): style
-                for style in styles
-            }
-            for future in as_completed(future_to_style):
-                style = future_to_style[future]
-                try:
-                    caption = future.result()
-                    if not caption or not caption.strip():
-                        caption = self._fallback_caption(style, observations)
-                except Exception as exc:
-                    logger.warning("Generation failed for style %s: %s", style, exc, exc_info=True)
-                    caption = self._fallback_caption(style, observations)
+        for style in styles:
+            value = payload.get(style)
+            if isinstance(value, dict):
+                value = value.get("caption") or value.get("text")
+            caption = CaptionPipeline._clean_caption(str(value or ""))
+            if caption:
                 captions[style] = caption
-
         return captions
 
-    def _caption(self, style: str, observations: dict[str, Any], allow_retry: bool = True) -> str:
-        if self.dry_run:
-            return DRY_RUN_CAPTIONS[style]
-
-        assert self.client is not None
-        prompt = load_prompt(STYLE_PROMPTS[style])
-        temp = (
-            self.settings.creative_temperature
-            if style in CREATIVE_STYLES
-            else self.settings.temperature
-        )
-        caption_request = {
-            "target_style": style,
-            "style_requirement": STYLE_DESCRIPTIONS.get(style, ""),
-            "strict_grounding_rules": [
-                "Use only summary, setting, subjects, key_objects, actions, timeline, visible_text, and audio_or_speech as factual evidence.",
-                "Never turn anything in uncertainties into a fact.",
-                "If the exact location, identity, motive, or text is uncertain, use generic wording instead of guessing.",
-                "Mention the main subject, setting, and primary action when supported.",
-                "Return only the final caption text.",
-            ],
-            "observations": observations,
-        }
-        messages = [
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": json.dumps(caption_request, indent=2)},
-        ]
-        response = self._caption_chat(messages, temp)
-        caption = response.strip().strip('"')
-        if allow_retry and self._needs_style_retry(style, caption):
-            retry_messages = messages + [
-                {
-                    "role": "user",
-                    "content": (
-                        "Rewrite the caption. It was too plain for the requested style. "
-                        "Keep the same observed facts, but make the target style obvious. "
-                        "Return only the rewritten caption text."
-                    ),
-                }
-            ]
-            response = self._caption_chat(retry_messages, temp)
-            caption = response.strip().strip('"')
-        return caption
-
-    def _caption_chat(
+    def _sanitize_caption_map(
         self,
-        messages: list[dict[str, Any]],
-        temperature: float,
-        json_mode: bool = False,
-    ) -> str:
-        assert self.client is not None
-        return self.client.chat(
-            self.settings.caption_model,
-            messages,
-            max_tokens=self.settings.caption_max_tokens,
-            temperature=temperature,
-            reasoning_effort=self.settings.reasoning_effort,
-            json_mode=json_mode,
-        )
+        styles: list[str],
+        captions: dict[str, str],
+        observations: dict[str, Any],
+    ) -> dict[str, str]:
+        return {
+            style: self._clean_caption(captions.get(style, "")) or self._fallback_caption(style, observations)
+            for style in styles
+        }
+
+    @staticmethod
+    def _observations_from_direct_response(parsed: dict[str, Any]) -> dict[str, Any]:
+        facts = parsed.get("visual_facts") or parsed.get("facts") or []
+        if isinstance(facts, str):
+            facts = [facts]
+        if not isinstance(facts, list):
+            facts = []
+        summary = str(parsed.get("summary") or "Captions were generated directly from sampled frames.").strip()
+        return {
+            "summary": summary,
+            "setting": str(parsed.get("setting") or "inferred from sampled frames").strip(),
+            "subjects": [str(item) for item in parsed.get("subjects", [])] if isinstance(parsed.get("subjects"), list) else [],
+            "key_objects": [str(item) for item in facts[:8]],
+            "actions": [str(item) for item in parsed.get("actions", [])] if isinstance(parsed.get("actions"), list) else [],
+            "timeline": [str(item) for item in parsed.get("timeline", [])] if isinstance(parsed.get("timeline"), list) else [],
+            "visible_text": [str(item) for item in parsed.get("visible_text", [])] if isinstance(parsed.get("visible_text"), list) else [],
+            "audio_or_speech": [str(item) for item in parsed.get("audio_or_speech", [])] if isinstance(parsed.get("audio_or_speech"), list) else [],
+            "uncertainties": ["Direct mode uses one multimodal caption call instead of a separate observation pass."],
+        }
+
+    @staticmethod
+    def _clean_caption(response: str) -> str:
+        cleaned = response.strip().strip('"').strip()
+        cleaned = re.sub(r"\s+", " ", cleaned)
+        cleaned = re.sub(r"\s+([,.!?])", r"\1", cleaned)
+        return cleaned
+
+    @staticmethod
+    def _caption_issues(styles: list[str], captions: dict[str, str]) -> list[str]:
+        issues: list[str] = []
+        for style in styles:
+            caption = captions.get(style, "")
+            if not caption:
+                issues.append(f"{style}: missing caption")
+                continue
+            if CaptionPipeline._needs_style_retry(style, caption):
+                issues.append(f"{style}: style too weak")
+            if CaptionPipeline._needs_length_retry(caption):
+                issues.append(f"{style}: too long")
+            if style == "humorous_non_tech" and CaptionPipeline._contains_non_tech_jargon(caption):
+                issues.append(f"{style}: contains tech jargon")
+        return issues
 
     @staticmethod
     def _needs_style_retry(style: str, caption: str) -> bool:
@@ -326,23 +440,15 @@ class CaptionPipeline:
         return False
 
     @staticmethod
-    def _sanitize_observations(observations: dict[str, Any]) -> dict[str, Any]:
-        cleaned = dict(observations)
-        uncertainties = cleaned.get("uncertainties")
-        if isinstance(uncertainties, list):
-            cleaned["uncertainties"] = [
-                CaptionPipeline._sanitize_uncertainty(str(item))
-                for item in uncertainties
-            ]
-        return cleaned
+    def _contains_non_tech_jargon(caption: str) -> bool:
+        normalized = caption.lower()
+        return any(re.search(rf"\b{re.escape(word)}\b", normalized) for word in NON_TECH_FORBIDDEN_WORDS)
 
     @staticmethod
-    def _sanitize_uncertainty(text: str) -> str:
-        lowered = text.lower()
-        if "exact city" in lowered or "exact location" in lowered:
-            if any(marker in lowered for marker in ("suggest", "may be", "might be", "probably", "looks like")):
-                return re.split(r"\bthough\b|\bbut\b|;|,", text, maxsplit=1, flags=re.IGNORECASE)[0].strip() + "."
-        return text
+    def _needs_length_retry(caption: str) -> bool:
+        words = re.findall(r"\b[\w'-]+\b", caption)
+        sentence_count = len(re.findall(r"[.!?]+", caption))
+        return len(words) > 36 or sentence_count > 2
 
     def _fallback_caption(self, style: str, observations: dict[str, Any]) -> str:
         summary = str(observations.get("summary") or observations.get("setting") or "").strip()
@@ -352,7 +458,7 @@ class CaptionPipeline:
         if style == "formal":
             return base
         if style == "sarcastic":
-            return f"{base} A very serious moment for ordinary visual evidence."
+            return f"{base} Clearly, ordinary visual evidence has never worked harder."
         if style == "humorous_tech":
             return f"{base} The scene ships its visual update with no rollback needed."
         return f"{base} It is doing its best to make everyday motion look eventful."
@@ -363,7 +469,7 @@ class CaptionPipeline:
 
         assert self.client is not None
         response = self.client.chat(
-            self.settings.judge_model,
+            self.settings.model,
             [
                 {"role": "system", "content": load_prompt("judge.txt")},
                 {
@@ -396,7 +502,6 @@ class CaptionPipeline:
         observations: dict[str, Any],
         captions: dict[str, str],
     ) -> dict[str, dict[str, str]]:
-        """Run quality checks for all styles concurrently using a thread pool."""
         if self.dry_run:
             return {
                 style: {"accuracy": "unknown", "tone": "unknown", "notes": "Dry run skipped model judging."}
@@ -441,7 +546,7 @@ class CaptionPipeline:
                         "content": f"Repair this {label} JSON:\n\n{response}",
                     },
                 ],
-                max_tokens=self.settings.max_tokens,
+                max_tokens=self.settings.caption_max_tokens,
                 temperature=0.0,
                 json_mode=True,
             )

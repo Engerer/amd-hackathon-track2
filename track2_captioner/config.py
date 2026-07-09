@@ -31,6 +31,7 @@ class Settings:
 
 def load_settings() -> Settings:
     load_dotenv()
+    default_model = "accounts/fireworks/models/qwen3p7-plus"
     allowed_models = [
         model.strip()
         for model in os.getenv("ALLOWED_MODELS", "").split(",")
@@ -39,11 +40,11 @@ def load_settings() -> Settings:
     model = (
         os.getenv("FIREWORKS_MODEL")
         or (allowed_models[0] if allowed_models else None)
-        or "accounts/fireworks/models/qwen2p5-vl-72b-instruct"
+        or default_model
     )
     caption_model = (
         os.getenv("FIREWORKS_CAPTION_MODEL", "").strip()
-        or "accounts/fireworks/models/qwen3p7-plus"
+        or model
     )
     return Settings(
         api_key=os.getenv("FIREWORKS_API_KEY", ""),

@@ -1,6 +1,17 @@
 const MAX_BODY_CHARS = 28_000_000;
 const MAX_TOKENS = 1000;
 const MAX_MESSAGES = 8;
+const MAX_TEMPERATURE = 0.9;
+
+function numberOrDefault(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function positiveNumberOrDefault(value, fallback) {
+  const number = numberOrDefault(value, fallback);
+  return number > 0 ? number : fallback;
+}
 
 function jsonResponse(body, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -59,10 +70,13 @@ export default {
     const payload = {
       model: body.model,
       messages: body.messages,
-      temperature: Math.min(Number(body.temperature || 0.2), 0.4),
-      max_tokens: Math.min(Number(body.max_tokens || 700), MAX_TOKENS),
+      temperature: Math.min(Math.max(numberOrDefault(body.temperature, 0.2), 0), MAX_TEMPERATURE),
+      max_tokens: Math.min(positiveNumberOrDefault(body.max_tokens, 700), MAX_TOKENS),
       reasoning_effort: body.reasoning_effort || "none",
     };
+    if (body.response_format && typeof body.response_format === "object") {
+      payload.response_format = body.response_format;
+    }
 
     const baseUrl = (env.FIREWORKS_BASE_URL || "https://api.fireworks.ai/inference/v1").replace(/\/$/, "");
     const fireworksResponse = await fetch(`${baseUrl}/chat/completions`, {
