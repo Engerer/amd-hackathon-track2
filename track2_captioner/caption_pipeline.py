@@ -34,13 +34,6 @@ CHECK_SCHEMA = json.dumps({
     "notes": "brief explanation",
 }, indent=2)
 
-CAPTIONS_SCHEMA = json.dumps({
-    "formal": "one concise factual caption",
-    "sarcastic": "one concise dry sarcastic caption",
-    "humorous_tech": "one concise caption with a clear tech joke",
-    "humorous_non_tech": "one concise caption with an everyday joke and no tech jargon",
-}, indent=2)
-
 CREATIVE_STYLES = {"sarcastic", "humorous_tech", "humorous_non_tech"}
 TECH_STYLE_WORDS = {
     "api",
@@ -184,52 +177,20 @@ class CaptionPipeline:
         if self.dry_run:
             return {style: DRY_RUN_CAPTIONS[style] for style in styles}
 
-        assert self.client is not None
-        requested = [style for style in styles if style in STYLE_DESCRIPTIONS]
-        caption_request = {
-            "task": "Write all requested video captions from the factual observations.",
-            "requested_styles": requested,
-            "rules": [
-                "Return strict JSON only, with one string value per requested style.",
-                "Each caption must be one concise sentence unless the style truly needs two.",
-                "Stay grounded in the observations; do not invent locations, speech, motives, brands, or unseen actions.",
-                "Formal must be plain and objective.",
-                "Sarcastic must be clearly dry or ironic, but not mean.",
-                "Humorous_tech must include one obvious software or developer reference such as queue, bug, deploy, latency, cache, pipeline, runtime, or rollback.",
-                "Humorous_non_tech must be funny for a general audience and must not use technical jargon.",
-                "Mention the main subject, setting, and primary action when supported.",
-            ],
-            "style_descriptions": {style: STYLE_DESCRIPTIONS[style] for style in requested},
-            "observations": observations,
-            "output_schema": {style: "caption text" for style in requested},
-        }
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You write accurate, judge-friendly video captions. "
-                    "Prioritize factual grounding, clear style match, and brevity. "
-                    "Return valid JSON only."
-                ),
-            },
-            {"role": "user", "content": json.dumps(caption_request, indent=2)},
-        ]
-
-        try:
-            response = self._caption_chat(messages, self.settings.creative_temperature, json_mode=True)
-            parsed = parse_json_object(response)
-        except Exception:
-            logger.warning("Batch caption generation failed.", exc_info=True)
-            return {style: self._fallback_caption(style, observations) for style in styles}
-
         captions: dict[str, str] = {}
-        for style in styles:
-            caption = str(parsed.get(style, "")).strip().strip('"')
-            if not caption:
-                caption = self._fallback_caption(style, observations)
-            if self._needs_style_retry(style, caption):
-                caption = self._fallback_caption(style, observations)
-            captions[style] = caption
+        workers = min(len(styles), 4)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            future_to_style = {
+                pool.submit(self._caption, style, observations): style
+                for style in styles
+            }
+            for future in as_completed(future_to_style):
+                style = future_to_style[future]
+                try:
+                    captions[style] = future.result()
+                except Exception:
+                    logger.warning("Caption generation failed for style %s.", style, exc_info=True)
+                    captions[style] = self._fallback_caption(style, observations)
         return captions
 
     def _caption(self, style: str, observations: dict[str, Any]) -> str:
@@ -276,7 +237,7 @@ class CaptionPipeline:
             caption = response.strip().strip('"')
         return caption
 
-    def _caption_chat(self, messages: list[dict[str, Any]], temperature: float, json_mode: bool = False) -> str:
+    def _caption_chat(self, messages: list[dict[str, Any]], temperature: float) -> str:
         assert self.client is not None
         try:
             return self.client.chat(
@@ -285,7 +246,6 @@ class CaptionPipeline:
                 max_tokens=self.settings.caption_max_tokens,
                 temperature=temperature,
                 reasoning_effort=self.settings.reasoning_effort,
-                json_mode=json_mode,
             )
         except Exception:
             if self.settings.caption_model == self.settings.model:
@@ -302,7 +262,6 @@ class CaptionPipeline:
                 max_tokens=self.settings.caption_max_tokens,
                 temperature=temperature,
                 reasoning_effort=self.settings.reasoning_effort,
-                json_mode=json_mode,
             )
 
     @staticmethod
@@ -341,7 +300,7 @@ class CaptionPipeline:
         if style == "formal":
             return base
         if style == "sarcastic":
-            return f"{base} Because apparently this was the main event."
+            return f"{base} A very serious moment for ordinary visual evidence."
         if style == "humorous_tech":
             return f"{base} The scene ships its visual update with no rollback needed."
         return f"{base} It is doing its best to make everyday motion look eventful."
