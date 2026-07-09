@@ -78,6 +78,29 @@ def fallback_captions(styles: list[str]) -> dict[str, str]:
     }
 
 
+def choose_task_frame_budget(
+    max_frames: int,
+    task_count: int,
+    completed_count: int,
+    elapsed_seconds: float,
+    hard_deadline_seconds: float,
+    reduce_frames_after_seconds: float,
+) -> int:
+    cap = max(1, max_frames)
+    if task_count >= 10:
+        cap = min(cap, 8)
+
+    remaining_tasks = max(1, task_count - completed_count)
+    remaining_seconds = max(0.0, hard_deadline_seconds - elapsed_seconds)
+    seconds_per_task = remaining_seconds / remaining_tasks
+
+    if elapsed_seconds >= reduce_frames_after_seconds or seconds_per_task < 45:
+        cap = min(cap, 6)
+    if seconds_per_task < 30:
+        cap = min(cap, 4)
+    return max(1, cap)
+
+
 def run_harness(input_path: Path, output_path: Path) -> int:
     started_at = time.monotonic()
     settings = load_settings()
@@ -114,7 +137,7 @@ def run_harness(input_path: Path, output_path: Path) -> int:
             enable_style_retry=enable_style_retry,
         )
 
-        for task in tasks:
+        for task_index, task in enumerate(tasks):
             task_started_at = time.monotonic()
             task_id = str(task.get("task_id", ""))
             video_url = str(task.get("video_url", ""))
@@ -155,7 +178,14 @@ def run_harness(input_path: Path, output_path: Path) -> int:
                 asset = VideoAsset(video_id=task_id, path=video_path, transcript_path=None)
 
                 elapsed = time.monotonic() - started_at
-                task_max_frames = 12 if elapsed >= reduce_frames_after else max_frames
+                task_max_frames = choose_task_frame_budget(
+                    max_frames=max_frames,
+                    task_count=len(tasks),
+                    completed_count=task_index,
+                    elapsed_seconds=elapsed,
+                    hard_deadline_seconds=hard_deadline_seconds,
+                    reduce_frames_after_seconds=reduce_frames_after,
+                )
                 task_enable_style_retry = enable_style_retry and elapsed < skip_style_retry_after
                 force_fallback_captions = elapsed >= fallback_captions_after
 

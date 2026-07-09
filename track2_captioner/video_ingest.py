@@ -14,11 +14,12 @@ logger = logging.getLogger(__name__)
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
 MIN_VIDEO_DURATION_SECONDS = 30.0
-MAX_VIDEO_DURATION_SECONDS = 120.0
+MAX_VIDEO_DURATION_SECONDS = 240.0
 DURATION_TOLERANCE_SECONDS = 0.5
 ABSOLUTE_MAX_FRAMES = 20
-DEFAULT_MAX_FRAMES = 18
-DEFAULT_FRAME_PROFILE = "balanced"
+DEFAULT_MAX_FRAMES = 8
+DEFAULT_FRAME_PROFILE = "fast"
+FAST_FRAME_PROFILES = {"fast", "storyboard"}
 
 
 class VideoDurationError(ValueError):
@@ -244,7 +245,12 @@ def compute_dynamic_frame_count(
     cap = min(max_frames, ABSOLUTE_MAX_FRAMES)
     if duration_seconds is None or duration_seconds <= 0:
         return cap
-    if frame_profile != "balanced":
+    profile = (frame_profile or DEFAULT_FRAME_PROFILE).lower()
+    if profile in FAST_FRAME_PROFILES:
+        if duration_seconds <= 60:
+            return min(6, cap)
+        return min(8, cap)
+    if profile != "balanced":
         return cap
     if duration_seconds <= 45:
         return min(14, cap)
@@ -465,6 +471,48 @@ def _extract_adaptive_frames_opencv(
         capture.release()
 
 
+def _extract_timestamp_frames_opencv(
+    video_path: Path,
+    frame_dir: Path,
+    max_frames: int,
+    width: int,
+) -> list[Path]:
+    import cv2
+
+    _reset_dir(frame_dir)
+    duration = probe_duration_seconds(video_path)
+    capture = cv2.VideoCapture(str(video_path))
+    if not capture.isOpened():
+        return []
+
+    try:
+        if duration is None or duration <= 0:
+            fps = capture.get(cv2.CAP_PROP_FPS) or 0
+            frame_count = capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+            if fps > 0 and frame_count > 0:
+                duration = frame_count / fps
+        timestamps = _sample_timestamps(duration, max_frames)
+        if not timestamps:
+            return []
+
+        frames: list[Path] = []
+        for index, timestamp in enumerate(timestamps, start=1):
+            capture.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000)
+            ok, frame = capture.read()
+            if not ok or frame is None:
+                continue
+            height, original_width = frame.shape[:2]
+            if original_width > 0:
+                target_height = max(1, round(height * (width / original_width)))
+                frame = cv2.resize(frame, (width, target_height), interpolation=cv2.INTER_AREA)
+            output_path = frame_dir / f"frame_{index:03d}.jpg"
+            if cv2.imwrite(str(output_path), frame):
+                frames.append(output_path)
+        return frames
+    finally:
+        capture.release()
+
+
 def extract_frames(
     video_path: Path,
     frame_dir: Path,
@@ -476,6 +524,25 @@ def extract_frames(
 
     duration = probe_duration_seconds(video_path)
     effective_max = compute_dynamic_frame_count(duration, max_frames, frame_profile)
+    profile = (frame_profile or DEFAULT_FRAME_PROFILE).lower()
+
+    if profile in FAST_FRAME_PROFILES:
+        try:
+            fast_frames = _extract_timestamp_frames_opencv(
+                video_path,
+                frame_dir / "fast",
+                effective_max,
+                width,
+            )
+            if fast_frames:
+                logger.info("Fast timestamp selection: kept %d frames.", len(fast_frames))
+                return deduplicate_frames(fast_frames)
+        except Exception:
+            logger.warning("Fast OpenCV frame selection failed; using ffmpeg fallback.", exc_info=True)
+
+        anchor_frames = _extract_anchor_frames(video_path, frame_dir / "anchor", effective_max, width)
+        if anchor_frames:
+            return deduplicate_frames(anchor_frames)
 
     try:
         adaptive_frames = _extract_adaptive_frames_opencv(

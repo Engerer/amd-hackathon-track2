@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
+
+from PIL import Image, ImageDraw
 
 from track2_captioner.config import Settings
 from track2_captioner.fireworks_client import FireworksClient, image_to_data_url
@@ -38,6 +41,8 @@ DIRECT_CAPTION_SYSTEM = (
     "Inspect the sampled video frames in chronological order and generate final captions directly. "
     "Do not write an intermediate observation report. Return strict JSON only."
 )
+STORYBOARD_COLUMNS = 4
+STORYBOARD_THUMB_WIDTH = 360
 
 HUMOR_NON_TECH_WORDS = {
     "actually",
@@ -166,21 +171,26 @@ class CaptionPipeline:
         selected_styles = [style for style in (styles or list(STYLE_PROMPTS)) if style in STYLE_PROMPTS]
 
         frame_dir = self.work_dir / asset.video_id
-        frame_started_at = time.monotonic()
-        frames = [] if self.dry_run else extract_frames(
-            asset.path,
-            frame_dir,
-            max_frames or self.max_frames,
-            frame_profile=frame_profile,
+        should_fallback = force_fallback_captions or (
+            caption_fallback_deadline is not None
+            and time.monotonic() >= caption_fallback_deadline
         )
+        frame_started_at = time.monotonic()
+        frames: list[Path] = []
+        model_images: list[Path] = []
+        if not should_fallback:
+            frames = [] if self.dry_run else extract_frames(
+                asset.path,
+                frame_dir,
+                max_frames or self.max_frames,
+                frame_profile=frame_profile,
+            )
+            model_images = self._prepare_model_images(frames, frame_dir)
         timings["frame_extraction_sec"] = time.monotonic() - frame_started_at
 
         transcript = self._read_transcript(asset)
         caption_started_at = time.monotonic()
-        if force_fallback_captions or (
-            caption_fallback_deadline is not None
-            and time.monotonic() >= caption_fallback_deadline
-        ):
+        if should_fallback:
             observations = dict(EMPTY_OBSERVATIONS)
             captions = {
                 style: self._fallback_caption(style, observations)
@@ -189,7 +199,8 @@ class CaptionPipeline:
         else:
             captions, observations = self._direct_captions(
                 asset=asset,
-                frames=frames,
+                model_images=model_images,
+                source_frame_count=len(frames),
                 transcript=transcript,
                 styles=selected_styles,
                 enable_style_retry=(
@@ -213,6 +224,8 @@ class CaptionPipeline:
             "source_path": str(asset.path),
             "frames": [str(frame) for frame in frames],
             "frame_count": len(frames),
+            "model_images": [str(image) for image in model_images],
+            "model_image_count": len(model_images),
             "sampling_strategy": frames[0].parent.name if frames else "none",
             "observations": observations,
             "captions": captions,
@@ -220,10 +233,65 @@ class CaptionPipeline:
             "timings": timings,
         }
 
+    def _prepare_model_images(self, frames: list[Path], frame_dir: Path) -> list[Path]:
+        if len(frames) <= 1:
+            return frames
+
+        storyboard_path = frame_dir / "storyboard" / "storyboard.jpg"
+        try:
+            self._build_storyboard(frames, storyboard_path)
+            return [storyboard_path]
+        except Exception:
+            logger.warning("Storyboard build failed; falling back to individual frames.", exc_info=True)
+            return frames
+
+    @staticmethod
+    def _build_storyboard(frames: list[Path], output_path: Path) -> None:
+        loaded: list[Image.Image] = []
+        for frame_path in frames:
+            with Image.open(frame_path) as image:
+                image = image.convert("RGB")
+                scale = STORYBOARD_THUMB_WIDTH / max(image.width, 1)
+                target_height = max(1, round(image.height * scale))
+                loaded.append(image.resize((STORYBOARD_THUMB_WIDTH, target_height), Image.LANCZOS))
+
+        if not loaded:
+            raise ValueError("No frames available for storyboard.")
+
+        columns = min(STORYBOARD_COLUMNS, len(loaded))
+        rows = math.ceil(len(loaded) / columns)
+        gutter = 8
+        label_height = 26
+        thumb_height = max(image.height for image in loaded)
+        cell_height = label_height + thumb_height
+        width = (columns * STORYBOARD_THUMB_WIDTH) + ((columns + 1) * gutter)
+        height = (rows * cell_height) + ((rows + 1) * gutter)
+        canvas = Image.new("RGB", (width, height), (244, 244, 244))
+        draw = ImageDraw.Draw(canvas)
+
+        for index, image in enumerate(loaded):
+            row = index // columns
+            column = index % columns
+            x = gutter + (column * (STORYBOARD_THUMB_WIDTH + gutter))
+            y = gutter + (row * (cell_height + gutter))
+            draw.rectangle(
+                [x, y, x + STORYBOARD_THUMB_WIDTH, y + label_height],
+                fill=(24, 24, 24),
+            )
+            draw.text((x + 8, y + 6), f"Frame {index + 1}", fill=(255, 255, 255))
+            paste_y = y + label_height
+            if image.height < thumb_height:
+                paste_y += (thumb_height - image.height) // 2
+            canvas.paste(image, (x, paste_y))
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        canvas.save(output_path, format="JPEG", quality=82, optimize=True)
+
     def _direct_captions(
         self,
         asset: VideoAsset,
-        frames: list[Path],
+        model_images: list[Path],
+        source_frame_count: int,
         transcript: str,
         styles: list[str],
         enable_style_retry: bool,
@@ -232,7 +300,7 @@ class CaptionPipeline:
             return {style: DRY_RUN_CAPTIONS[style] for style in styles}, dict(EMPTY_OBSERVATIONS)
 
         assert self.client is not None
-        content = self._direct_caption_content(asset, frames, transcript, styles)
+        content = self._direct_caption_content(asset, model_images, source_frame_count, transcript, styles)
         response = self.client.chat(
             self.settings.model,
             [
@@ -252,7 +320,15 @@ class CaptionPipeline:
         if enable_style_retry:
             issues = self._caption_issues(styles, raw_captions)
             if issues:
-                captions = self._retry_direct_captions(asset, frames, transcript, styles, captions, issues)
+                captions = self._retry_direct_captions(
+                    asset,
+                    model_images,
+                    source_frame_count,
+                    transcript,
+                    styles,
+                    captions,
+                    issues,
+                )
                 observations = self._observations_from_direct_response({
                     "captions": captions,
                     "visual_facts": observations.get("key_objects", []),
@@ -263,7 +339,8 @@ class CaptionPipeline:
     def _direct_caption_content(
         self,
         asset: VideoAsset,
-        frames: list[Path],
+        model_images: list[Path],
+        source_frame_count: int,
         transcript: str,
         styles: list[str],
     ) -> list[dict[str, Any]]:
@@ -272,15 +349,23 @@ class CaptionPipeline:
             for style in styles
             if style in STYLE_DESCRIPTIONS
         }
+        visual_input = (
+            f"The attached image is a storyboard containing {source_frame_count} sampled "
+            "video frames in chronological order, numbered left-to-right and top-to-bottom."
+            if len(model_images) == 1 and source_frame_count > 1
+            else "The attached images are sampled video frames in chronological order."
+        )
         request = {
             "video_id": asset.video_id,
-            "task": "Generate final captions directly from the provided frames.",
+            "task": "Generate final captions directly from the sampled video evidence.",
+            "visual_input": visual_input,
             "requested_styles": style_requirements,
             "optional_transcript": transcript or "[none provided]",
             "rules": [
                 "Use the frames as the primary source of truth.",
                 "Write every caption in English.",
                 "Treat frames as chronological samples from one video.",
+                "If a storyboard is provided, read frames by their numbers from left to right and top to bottom.",
                 "Mention the main subject, setting, and primary action when visible.",
                 "Use only visible or transcript-backed facts; do not invent motives, identities, locations, speech, or hidden context.",
                 "Never turn uncertainty into a concrete claim.",
@@ -298,7 +383,7 @@ class CaptionPipeline:
                 "text": json.dumps(request, indent=2),
             }
         ]
-        for frame in frames:
+        for frame in model_images:
             content.append(
                 {
                     "type": "image_url",
@@ -310,7 +395,8 @@ class CaptionPipeline:
     def _retry_direct_captions(
         self,
         asset: VideoAsset,
-        frames: list[Path],
+        model_images: list[Path],
+        source_frame_count: int,
         transcript: str,
         styles: list[str],
         current_captions: dict[str, str],
@@ -322,6 +408,12 @@ class CaptionPipeline:
             "task": "Repair the direct video captions using the frames again.",
             "issues": issues,
             "current_captions": current_captions,
+            "visual_input": (
+                f"The attached image is a storyboard containing {source_frame_count} sampled "
+                "video frames in chronological order, numbered left-to-right and top-to-bottom."
+                if len(model_images) == 1 and source_frame_count > 1
+                else "The attached images are sampled video frames in chronological order."
+            ),
             "requested_styles": {
                 style: STYLE_DESCRIPTIONS[style]
                 for style in styles
@@ -338,7 +430,7 @@ class CaptionPipeline:
             "response_schema": CAPTION_SCHEMA,
         }
         content: list[dict[str, Any]] = [{"type": "text", "text": json.dumps(repair_request, indent=2)}]
-        for frame in frames:
+        for frame in model_images:
             content.append({"type": "image_url", "image_url": {"url": image_to_data_url(frame)}})
 
         response = self.client.chat(
