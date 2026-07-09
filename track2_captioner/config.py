@@ -23,7 +23,7 @@ class Settings:
     temperature: float = 0.2
     creative_temperature: float = 0.75
     max_tokens: int = 1200
-    caption_max_tokens: int = 260
+    caption_max_tokens: int = 520
     check_max_tokens: int = 180
     reasoning_effort: str = "none"
     max_retries: int = 5
@@ -56,7 +56,7 @@ def load_settings() -> Settings:
         temperature=float(os.getenv("FIREWORKS_TEMPERATURE", "0.2")),
         creative_temperature=float(os.getenv("FIREWORKS_CREATIVE_TEMPERATURE", "0.75")),
         max_tokens=int(os.getenv("FIREWORKS_MAX_TOKENS", "1200")),
-        caption_max_tokens=int(os.getenv("FIREWORKS_CAPTION_MAX_TOKENS", "260")),
+        caption_max_tokens=int(os.getenv("FIREWORKS_CAPTION_MAX_TOKENS", "520")),
         check_max_tokens=int(os.getenv("FIREWORKS_CHECK_MAX_TOKENS", "180")),
         reasoning_effort=os.getenv("FIREWORKS_REASONING_EFFORT", "none"),
         max_retries=int(os.getenv("FIREWORKS_MAX_RETRIES", "5")),

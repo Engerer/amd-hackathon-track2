@@ -23,16 +23,16 @@ https://github.com/nish0203/amd-track2-captioner
 
 ## How It Works
 
-The pipeline samples timeline evidence instead of processing every video frame. By default it extracts evenly spaced anchor frames across the full clip, with a 32-frame safety cap for accuracy and runtime control.
+The pipeline samples timeline evidence instead of processing every video frame. By default it uses OpenCV to scan low-resolution candidate frames, then keeps a diverse 14-18 frame evidence pack with beginning, middle, and end coverage.
 
 ```text
 video URL
  -> download video
  -> ffprobe checks duration
- -> ffmpeg extracts timeline anchor frames across the full clip
+ -> OpenCV scores candidate frames for motion, scene change, sharpness, brightness, and diversity
  -> resize each frame to 768px width
  -> Kimi K2.6 creates detailed factual observations from frames
- -> GLM 5.2 writes four style-specific captions from the observations
+ -> GLM 5.2 writes all requested style captions from the observations in one batched call
  -> Docker writes /output/results.json
 ```
 
@@ -52,20 +52,20 @@ The first Kimi call receives image frames and creates observations:
 }
 ```
 
-The caption calls use those observations only, so they are cheaper than sending frames again.
+The caption call uses those observations only, so it is cheaper than sending frames again. If one style is missing or too weak, the pipeline retries only one style to protect the 10-minute runtime.
 
 ## Defaults
 
 - Vision model: `accounts/fireworks/models/kimi-k2p6`
 - Caption model: `accounts/fireworks/models/glm-5p2`
-- Frame sampling: adaptive timeline anchor frames
-- Frame cap: `32` total frames per video
+- Frame sampling: adaptive OpenCV candidate selection
+- Frame cap: `18` total frames per video by default, hard-capped at `20`
 - Frame width: `768px`
-- Whisper audio transcription: on by default in Docker with the `tiny` model
+- Whisper audio transcription: off by default in Docker
 - Internal judge checks: off by default
 - Fireworks key: stored in a Cloudflare Worker secret, not in the repo
 
-Important: `32` is a safety cap, not 32 FPS. A 30-second video gives about 10 frames, and a 2-minute video gives up to 32 frames.
+Important: `18` is a safety cap, not 18 FPS. A 30-45 second video gives up to 14 selected frames, 45-75 seconds gives up to 16, and 75-120 seconds gives up to 18.
 
 ## Quick Start
 
@@ -151,7 +151,7 @@ $env:AUTO_TRANSCRIBE="true"
 $env:WHISPER_MODEL="base"
 ```
 
-The submitted Docker image installs Whisper and enables `AUTO_TRANSCRIBE=true` with `WHISPER_MODEL=tiny`.
+The submitted Docker image keeps `AUTO_TRANSCRIBE=false` by default for runtime safety. Whisper can be enabled manually with `AUTO_TRANSCRIBE=true` and `WHISPER_MODEL=tiny`.
 Videos without an audio stream skip Whisper and continue through the visual caption pipeline.
 
 ## Docker
@@ -228,10 +228,14 @@ Example output:
 Useful variables:
 
 ```text
-TRACK2_MAX_FRAMES=32
+TRACK2_RUNTIME_TARGET_SECONDS=540
+TRACK2_HARD_DEADLINE_SECONDS=585
+TRACK2_FRAME_PROFILE=balanced
+TRACK2_MAX_FRAMES=18
+TRACK2_ENABLE_STYLE_RETRY=true
 TRACK2_DRY_RUN=true
 RUN_CHECKS=true
-AUTO_TRANSCRIBE=true
+AUTO_TRANSCRIBE=false
 WHISPER_MODEL=tiny
 WHISPER_LANGUAGE=en
 MODEL_PROXY_URL=https://track2-fireworks-proxy.proxide-track2.workers.dev
@@ -243,8 +247,10 @@ Recommended final settings:
 
 ```text
 RUN_CHECKS=false
-AUTO_TRANSCRIBE=true
-TRACK2_MAX_FRAMES=32
+AUTO_TRANSCRIBE=false
+TRACK2_FRAME_PROFILE=balanced
+TRACK2_MAX_FRAMES=18
+TRACK2_ENABLE_STYLE_RETRY=true
 ```
 
 ## Prompt Tuning

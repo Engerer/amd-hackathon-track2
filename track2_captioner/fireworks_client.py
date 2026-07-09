@@ -9,15 +9,6 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from tenacity import (
-    retry,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_exponential_jitter,
-    before_sleep_log,
-    RetryError,
-)
-
 logger = logging.getLogger(__name__)
 
 RETRY_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
@@ -83,6 +74,8 @@ class FireworksClient:
     # ── Proxy path ──────────────────────────────────────────────────────
 
     def _chat_proxy_with_retry(self, payload: dict[str, Any]) -> str:
+        from tenacity import RetryError, before_sleep_log, retry, retry_if_exception_type, stop_after_attempt, wait_exponential_jitter
+
         @retry(
             stop=stop_after_attempt(self.max_retries),
             wait=wait_exponential_jitter(initial=1, max=32, jitter=2),
@@ -123,6 +116,8 @@ class FireworksClient:
     # ── Direct Fireworks path ───────────────────────────────────────────
 
     def _chat_direct_with_retry(self, requests: Any, payload: dict[str, Any]) -> str:
+        from tenacity import RetryError, before_sleep_log, retry, retry_if_exception_type, stop_after_attempt, wait_exponential_jitter
+
         @retry(
             stop=stop_after_attempt(self.max_retries),
             wait=wait_exponential_jitter(initial=1, max=32, jitter=2),

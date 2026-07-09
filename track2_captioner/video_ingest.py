@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 
 logger = logging.getLogger(__name__)
@@ -14,8 +16,9 @@ VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
 MIN_VIDEO_DURATION_SECONDS = 30.0
 MAX_VIDEO_DURATION_SECONDS = 120.0
 DURATION_TOLERANCE_SECONDS = 0.5
-ABSOLUTE_MAX_FRAMES = 12
-DEFAULT_MAX_FRAMES = ABSOLUTE_MAX_FRAMES
+ABSOLUTE_MAX_FRAMES = 20
+DEFAULT_MAX_FRAMES = 18
+DEFAULT_FRAME_PROFILE = "balanced"
 
 
 class VideoDurationError(ValueError):
@@ -27,6 +30,16 @@ class VideoAsset:
     video_id: str
     path: Path
     transcript_path: Path | None
+
+
+@dataclass(frozen=True)
+class FrameCandidate:
+    timestamp: float
+    score: float
+    sharpness: float
+    brightness: float
+    motion: float
+    hash_value: int
 
 
 def discover_videos(input_dir: Path, transcript_dir: Path | None = None) -> list[VideoAsset]:
@@ -222,18 +235,22 @@ def _extract_scene_frames(video_path: Path, frame_dir: Path, max_frames: int, wi
     return sorted(frame_dir.glob("frame_*.jpg"))
 
 
-def compute_dynamic_frame_count(duration_seconds: float | None, max_frames: int) -> int:
+def compute_dynamic_frame_count(
+    duration_seconds: float | None,
+    max_frames: int,
+    frame_profile: str = DEFAULT_FRAME_PROFILE,
+) -> int:
     """Scale frame count by video duration while preserving enough evidence for judging."""
     cap = min(max_frames, ABSOLUTE_MAX_FRAMES)
     if duration_seconds is None or duration_seconds <= 0:
         return cap
-    if duration_seconds <= 30:
-        return min(10, cap)
-    if duration_seconds <= 60:
-        return min(18, cap)
-    if duration_seconds <= 90:
-        return min(24, cap)
-    return cap
+    if frame_profile != "balanced":
+        return cap
+    if duration_seconds <= 45:
+        return min(14, cap)
+    if duration_seconds <= 75:
+        return min(16, cap)
+    return min(18, cap)
 
 
 def _average_hash(image_path: Path, hash_size: int = 8) -> int:
@@ -282,22 +299,207 @@ def deduplicate_frames(frame_paths: list[Path], threshold: int = 6) -> list[Path
     return kept
 
 
-def extract_frames(video_path: Path, frame_dir: Path, max_frames: int = DEFAULT_MAX_FRAMES, width: int = 768) -> list[Path]:
+def _normalize_score(value: float, scale: float) -> float:
+    if value <= 0:
+        return 0.0
+    return min(value / scale, 1.0)
+
+
+def _candidate_hash(gray: Any) -> int:
+    import cv2
+
+    small = cv2.resize(gray, (8, 8), interpolation=cv2.INTER_AREA)
+    mean = float(small.mean())
+    bits = small >= mean
+    value = 0
+    for index, enabled in enumerate(bits.flatten()):
+        if bool(enabled):
+            value |= 1 << index
+    return value
+
+
+def _candidate_score(gray: Any, previous_gray: Any | None) -> tuple[float, float, float, float]:
+    import cv2
+
+    sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+    brightness = float(gray.mean())
+    if previous_gray is None:
+        motion = 0.0
+    else:
+        motion = float(cv2.absdiff(gray, previous_gray).mean())
+
+    brightness_score = max(0.0, 1.0 - (abs(brightness - 127.0) / 127.0))
+    sharpness_score = _normalize_score(sharpness, 500.0)
+    motion_score = _normalize_score(motion, 45.0)
+    score = (sharpness_score * 0.35) + (brightness_score * 0.25) + (motion_score * 0.40)
+    return score, sharpness, brightness, motion
+
+
+def _compute_candidate_count(duration: float | None, final_count: int) -> int:
+    if duration is None or duration <= 0:
+        return min(72, max(final_count * 4, 48))
+    return min(72, max(final_count * 4, math.ceil(duration * 0.5)))
+
+
+def _closest_candidate(candidates: list[FrameCandidate], timestamp: float) -> FrameCandidate | None:
+    if not candidates:
+        return None
+    return min(candidates, key=lambda candidate: abs(candidate.timestamp - timestamp))
+
+
+def _add_candidate_once(selected: dict[float, FrameCandidate], candidate: FrameCandidate | None) -> None:
+    if candidate is not None:
+        selected[candidate.timestamp] = candidate
+
+
+def _select_adaptive_candidates(
+    candidates: list[FrameCandidate],
+    duration: float,
+    final_count: int,
+) -> list[FrameCandidate]:
+    selected: dict[float, FrameCandidate] = {}
+    _add_candidate_once(selected, _closest_candidate(candidates, min(0.5, duration * 0.05)))
+    _add_candidate_once(selected, _closest_candidate(candidates, duration / 2))
+    _add_candidate_once(selected, _closest_candidate(candidates, max(duration - 0.5, 0)))
+
+    segment_count = min(final_count, 6 if duration > 75 else 5)
+    for index in range(segment_count):
+        start = duration * (index / segment_count)
+        end = duration * ((index + 1) / segment_count)
+        segment = [
+            candidate for candidate in candidates
+            if start <= candidate.timestamp <= end
+        ]
+        if segment:
+            _add_candidate_once(selected, max(segment, key=lambda candidate: candidate.score))
+
+    min_gap = max(duration / max(final_count * 2.5, 1), 0.75)
+    for candidate in sorted(candidates, key=lambda item: item.score, reverse=True):
+        if len(selected) >= final_count:
+            break
+        too_close = any(abs(candidate.timestamp - kept.timestamp) < min_gap for kept in selected.values())
+        too_similar = any(_hamming_distance(candidate.hash_value, kept.hash_value) < 5 for kept in selected.values())
+        if not too_close and not too_similar:
+            selected[candidate.timestamp] = candidate
+
+    if len(selected) < final_count:
+        for candidate in sorted(candidates, key=lambda item: item.score, reverse=True):
+            if len(selected) >= final_count:
+                break
+            selected.setdefault(candidate.timestamp, candidate)
+
+    return sorted(selected.values(), key=lambda candidate: candidate.timestamp)[:final_count]
+
+
+def _extract_adaptive_frames_opencv(
+    video_path: Path,
+    frame_dir: Path,
+    max_frames: int,
+    width: int,
+    frame_profile: str,
+) -> list[Path]:
+    import cv2
+
+    _reset_dir(frame_dir)
+    duration = probe_duration_seconds(video_path)
+    capture = cv2.VideoCapture(str(video_path))
+    if not capture.isOpened():
+        return []
+
+    try:
+        if duration is None or duration <= 0:
+            fps = capture.get(cv2.CAP_PROP_FPS) or 0
+            frame_count = capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+            if fps > 0 and frame_count > 0:
+                duration = frame_count / fps
+        if duration is None or duration <= 0:
+            return []
+
+        final_count = compute_dynamic_frame_count(duration, max_frames, frame_profile)
+        candidate_count = _compute_candidate_count(duration, final_count)
+        timestamps = _sample_timestamps(duration, candidate_count)
+        if not timestamps:
+            return []
+
+        candidates: list[FrameCandidate] = []
+        previous_gray: Any | None = None
+        for timestamp in timestamps:
+            capture.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000)
+            ok, frame = capture.read()
+            if not ok or frame is None:
+                continue
+            resized = cv2.resize(frame, (160, 90), interpolation=cv2.INTER_AREA)
+            gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+            score, sharpness, brightness, motion = _candidate_score(gray, previous_gray)
+            candidates.append(
+                FrameCandidate(
+                    timestamp=timestamp,
+                    score=score,
+                    sharpness=sharpness,
+                    brightness=brightness,
+                    motion=motion,
+                    hash_value=_candidate_hash(gray),
+                )
+            )
+            previous_gray = gray
+
+        selected = _select_adaptive_candidates(candidates, duration, final_count)
+        if not selected:
+            return []
+
+        frames: list[Path] = []
+        for index, candidate in enumerate(selected, start=1):
+            capture.set(cv2.CAP_PROP_POS_MSEC, candidate.timestamp * 1000)
+            ok, frame = capture.read()
+            if not ok or frame is None:
+                continue
+            height, original_width = frame.shape[:2]
+            if original_width > 0:
+                target_height = max(1, round(height * (width / original_width)))
+                frame = cv2.resize(frame, (width, target_height), interpolation=cv2.INTER_AREA)
+            output_path = frame_dir / f"frame_{index:03d}.jpg"
+            if cv2.imwrite(str(output_path), frame):
+                frames.append(output_path)
+        return frames
+    finally:
+        capture.release()
+
+
+def extract_frames(
+    video_path: Path,
+    frame_dir: Path,
+    max_frames: int = DEFAULT_MAX_FRAMES,
+    width: int = 768,
+    frame_profile: str = DEFAULT_FRAME_PROFILE,
+) -> list[Path]:
     frame_dir.mkdir(parents=True, exist_ok=True)
 
-    # Dynamic scaling: adapt frame budget to video duration
     duration = probe_duration_seconds(video_path)
-    effective_max = compute_dynamic_frame_count(duration, max_frames)
+    effective_max = compute_dynamic_frame_count(duration, max_frames, frame_profile)
 
-    minimum_frames = max(1, min(effective_max, 3))
-    anchor_frames = _extract_anchor_frames(video_path, frame_dir / "anchor", effective_max, width)
-    if len(anchor_frames) >= minimum_frames:
-        return anchor_frames
+    try:
+        adaptive_frames = _extract_adaptive_frames_opencv(
+            video_path,
+            frame_dir / "adaptive",
+            effective_max,
+            width,
+            frame_profile,
+        )
+        if adaptive_frames:
+            logger.info("Adaptive selection: kept %d frames.", len(adaptive_frames))
+            return adaptive_frames
+    except Exception:
+        logger.warning("Adaptive OpenCV frame selection failed; using ffmpeg fallback.", exc_info=True)
 
     scene_frames = _extract_scene_frames(video_path, frame_dir / "scene", effective_max, width)
     minimum_scene_frames = max(3, min(effective_max, effective_max // 2))
     if len(scene_frames) >= minimum_scene_frames:
         return deduplicate_frames(scene_frames)
+
+    minimum_frames = max(1, min(effective_max, 3))
+    anchor_frames = _extract_anchor_frames(video_path, frame_dir / "anchor", effective_max, width)
+    if len(anchor_frames) >= minimum_frames:
+        return deduplicate_frames(anchor_frames)
 
     uniform_frames = _extract_uniform_frames(video_path, frame_dir / "uniform", effective_max, width)
     if uniform_frames:

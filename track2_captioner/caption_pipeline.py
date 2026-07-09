@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -11,7 +12,7 @@ from track2_captioner.config import Settings
 from track2_captioner.fireworks_client import FireworksClient, image_to_data_url
 from track2_captioner.json_tools import parse_json_object
 from track2_captioner.prompts import STYLE_PROMPTS, load_prompt
-from track2_captioner.video_ingest import DEFAULT_MAX_FRAMES, VideoAsset, extract_frames
+from track2_captioner.video_ingest import DEFAULT_FRAME_PROFILE, DEFAULT_MAX_FRAMES, VideoAsset, extract_frames
 
 
 logger = logging.getLogger(__name__)
@@ -97,12 +98,14 @@ class CaptionPipeline:
         dry_run: bool = False,
         max_frames: int = DEFAULT_MAX_FRAMES,
         run_checks: bool = True,
+        enable_style_retry: bool = True,
     ) -> None:
         self.settings = settings
         self.work_dir = work_dir
         self.dry_run = dry_run
         self.max_frames = max_frames
         self.run_checks = run_checks
+        self.enable_style_retry = enable_style_retry
         self.client = None if dry_run else FireworksClient(
             settings.api_key,
             settings.base_url,
@@ -111,16 +114,58 @@ class CaptionPipeline:
             max_retries=settings.max_retries,
         )
 
-    def process(self, asset: VideoAsset, styles: list[str] | None = None) -> dict[str, Any]:
+    def process(
+        self,
+        asset: VideoAsset,
+        styles: list[str] | None = None,
+        max_frames: int | None = None,
+        frame_profile: str = DEFAULT_FRAME_PROFILE,
+        enable_style_retry: bool | None = None,
+        force_fallback_captions: bool = False,
+        caption_fallback_deadline: float | None = None,
+    ) -> dict[str, Any]:
+        started_at = time.monotonic()
+        timings: dict[str, float] = {}
         selected_styles = [style for style in (styles or list(STYLE_PROMPTS)) if style in STYLE_PROMPTS]
         frame_dir = self.work_dir / asset.video_id
-        frames = [] if self.dry_run else extract_frames(asset.path, frame_dir, self.max_frames)
+        frame_started_at = time.monotonic()
+        frames = [] if self.dry_run else extract_frames(
+            asset.path,
+            frame_dir,
+            max_frames or self.max_frames,
+            frame_profile=frame_profile,
+        )
+        timings["frame_extraction_sec"] = time.monotonic() - frame_started_at
         transcript = self._read_transcript(asset)
+        observe_started_at = time.monotonic()
         observations = self._observe(asset, frames, transcript)
-        captions = self._captions(selected_styles, observations)
+        timings["vision_observation_sec"] = time.monotonic() - observe_started_at
+        caption_started_at = time.monotonic()
+        if force_fallback_captions or (
+            caption_fallback_deadline is not None
+            and time.monotonic() >= caption_fallback_deadline
+        ):
+            captions = {
+                style: self._fallback_caption(style, observations)
+                for style in selected_styles
+            }
+        else:
+            captions = self._captions(
+                selected_styles,
+                observations,
+                enable_style_retry=(
+                    self.enable_style_retry
+                    if enable_style_retry is None
+                    else enable_style_retry
+                ),
+            )
+        timings["caption_generation_sec"] = time.monotonic() - caption_started_at
         checks = {}
         if self.run_checks:
+            check_started_at = time.monotonic()
             checks = self._run_checks_concurrent(selected_styles, observations, captions)
+            timings["quality_check_sec"] = time.monotonic() - check_started_at
+        timings["total_process_sec"] = time.monotonic() - started_at
 
         return {
             "video_id": asset.video_id,
@@ -131,6 +176,7 @@ class CaptionPipeline:
             "observations": observations,
             "captions": captions,
             "checks": checks,
+            "timings": timings,
         }
 
     def _observe(self, asset: VideoAsset, frames: list[Path], transcript: str) -> dict[str, Any]:
@@ -173,27 +219,80 @@ class CaptionPipeline:
         observations = self._parse_or_repair_json(response, "perception observations", OBSERVATION_SCHEMA)
         return self._sanitize_observations(observations)
 
-    def _captions(self, styles: list[str], observations: dict[str, Any]) -> dict[str, str]:
+    def _captions(
+        self,
+        styles: list[str],
+        observations: dict[str, Any],
+        enable_style_retry: bool = True,
+    ) -> dict[str, str]:
         if self.dry_run:
             return {style: DRY_RUN_CAPTIONS[style] for style in styles}
 
+        assert self.client is not None
+        requested = [style for style in styles if style in STYLE_DESCRIPTIONS]
+        caption_request = {
+            "task": "Write all requested video captions from the factual observations.",
+            "requested_styles": requested,
+            "rules": [
+                "Return strict JSON only, with one string value per requested style.",
+                "Each caption must be one concise sentence unless the style truly needs two.",
+                "Stay grounded in the observations; do not invent locations, speech, motives, brands, or unseen actions.",
+                "Formal must be plain and objective.",
+                "Sarcastic must be clearly dry or ironic, but not mean.",
+                "Humorous_tech must include one obvious software or developer reference such as queue, bug, deploy, latency, cache, pipeline, runtime, or rollback.",
+                "Humorous_non_tech must be funny for a general audience and must not use technical jargon.",
+                "Mention the main subject, setting, and primary action when supported.",
+            ],
+            "style_descriptions": {style: STYLE_DESCRIPTIONS[style] for style in requested},
+            "observations": observations,
+            "output_schema": {style: "caption text" for style in requested},
+        }
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You write accurate, judge-friendly video captions. "
+                    "Prioritize factual grounding, clear style match, and brevity. "
+                    "Return valid JSON only."
+                ),
+            },
+            {"role": "user", "content": json.dumps(caption_request, indent=2)},
+        ]
+
+        try:
+            response = self._caption_chat(messages, self.settings.creative_temperature, json_mode=True)
+            parsed = parse_json_object(response)
+        except Exception:
+            logger.warning("Batch caption generation with JSON mode failed; retrying without JSON mode.", exc_info=True)
+            try:
+                response = self._caption_chat(messages, self.settings.creative_temperature, json_mode=False)
+                parsed = parse_json_object(response)
+            except Exception:
+                logger.warning("Batch caption generation failed.", exc_info=True)
+                parsed = {}
+
         captions: dict[str, str] = {}
-        workers = min(len(styles), 4)
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            future_to_style = {
-                pool.submit(self._caption, style, observations): style
-                for style in styles
-            }
-            for future in as_completed(future_to_style):
-                style = future_to_style[future]
-                try:
-                    captions[style] = future.result()
-                except Exception:
-                    logger.warning("Caption generation failed for style %s.", style, exc_info=True)
-                    captions[style] = self._fallback_caption(style, observations)
+        weak_styles: list[str] = []
+        for style in styles:
+            caption = str(parsed.get(style, "")).strip().strip('"')
+            if not caption:
+                captions[style] = self._fallback_caption(style, observations)
+                weak_styles.append(style)
+                continue
+            captions[style] = caption
+            if self._needs_style_retry(style, caption):
+                weak_styles.append(style)
+
+        if enable_style_retry and weak_styles:
+            retry_style = weak_styles[0]
+            try:
+                captions[retry_style] = self._caption(retry_style, observations, allow_retry=False)
+            except Exception:
+                logger.warning("Caption retry failed for style %s.", retry_style, exc_info=True)
+                captions[retry_style] = self._fallback_caption(retry_style, observations)
         return captions
 
-    def _caption(self, style: str, observations: dict[str, Any]) -> str:
+    def _caption(self, style: str, observations: dict[str, Any], allow_retry: bool = True) -> str:
         if self.dry_run:
             return DRY_RUN_CAPTIONS[style]
 
@@ -222,7 +321,7 @@ class CaptionPipeline:
         ]
         response = self._caption_chat(messages, temp)
         caption = response.strip().strip('"')
-        if self._needs_style_retry(style, caption):
+        if allow_retry and self._needs_style_retry(style, caption):
             retry_messages = messages + [
                 {
                     "role": "user",
@@ -237,7 +336,12 @@ class CaptionPipeline:
             caption = response.strip().strip('"')
         return caption
 
-    def _caption_chat(self, messages: list[dict[str, Any]], temperature: float) -> str:
+    def _caption_chat(
+        self,
+        messages: list[dict[str, Any]],
+        temperature: float,
+        json_mode: bool = False,
+    ) -> str:
         assert self.client is not None
         try:
             return self.client.chat(
@@ -246,6 +350,7 @@ class CaptionPipeline:
                 max_tokens=self.settings.caption_max_tokens,
                 temperature=temperature,
                 reasoning_effort=self.settings.reasoning_effort,
+                json_mode=json_mode,
             )
         except Exception:
             if self.settings.caption_model == self.settings.model:
@@ -262,6 +367,7 @@ class CaptionPipeline:
                 max_tokens=self.settings.caption_max_tokens,
                 temperature=temperature,
                 reasoning_effort=self.settings.reasoning_effort,
+                json_mode=json_mode,
             )
 
     @staticmethod
