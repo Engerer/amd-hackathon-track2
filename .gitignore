@@ -15,6 +15,7 @@ data/audio/
 data/transcripts/
 outputs/
 sample_output/
+local_test_output/
 docker_sample_output/
 docker_pushed_output/
 

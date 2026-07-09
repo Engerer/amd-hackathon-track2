@@ -9,10 +9,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from track2_captioner.audio_cues import analyze_audio_cues, format_audio_context
 from track2_captioner.caption_pipeline import CaptionPipeline
 from track2_captioner.config import load_settings
-from track2_captioner.transcription import transcribe_video
 from track2_captioner.video_ingest import DEFAULT_FRAME_PROFILE, DEFAULT_MAX_FRAMES, VIDEO_EXTENSIONS, VideoAsset, probe_duration_seconds
 
 
@@ -30,9 +28,19 @@ def truthy(value: str | None) -> bool:
 
 
 def read_tasks(input_path: Path) -> list[dict[str, Any]]:
-    payload = json.loads(input_path.read_text(encoding="utf-8-sig"))
+    if not input_path.exists():
+        print(f"Input task file not found at {input_path}; writing empty results.", file=sys.stderr)
+        return []
+
+    try:
+        payload = json.loads(input_path.read_text(encoding="utf-8-sig"))
+    except Exception as exc:
+        print(f"Could not read {input_path}: {exc}; writing empty results.", file=sys.stderr)
+        return []
+
     if not isinstance(payload, list):
-        raise ValueError("/input/tasks.json must contain a JSON array.")
+        print(f"{input_path} must contain a JSON array; writing empty results.", file=sys.stderr)
+        return []
     return payload
 
 
@@ -160,8 +168,8 @@ def run_harness(input_path: Path, output_path: Path) -> int:
     whisper_language = os.getenv("WHISPER_LANGUAGE", "").strip() or None
     transcribed_count = 0
 
-    tasks = read_tasks(input_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    tasks = read_tasks(input_path)
     output_results: list[dict[str, Any]] = [
         {
             "task_id": str(task.get("task_id", "")),
@@ -170,6 +178,8 @@ def run_harness(input_path: Path, output_path: Path) -> int:
         for task in tasks
     ]
     write_results(output_path, output_results)
+    if not tasks:
+        return 0
 
     with tempfile.TemporaryDirectory(prefix="track2_harness_") as temp_dir_name:
         temp_dir = Path(temp_dir_name)
@@ -242,10 +252,17 @@ def run_harness(input_path: Path, output_path: Path) -> int:
 
                 audio_context = ""
                 audio_cues = None
+                format_audio_context_fn = None
                 if audio_cues_enabled and not dry_run:
                     try:
+                        from track2_captioner.audio_cues import (
+                            analyze_audio_cues,
+                            format_audio_context as loaded_format_audio_context,
+                        )
+
+                        format_audio_context_fn = loaded_format_audio_context
                         audio_cues = analyze_audio_cues(video_path, sample_seconds=audio_cue_seconds)
-                        audio_context = format_audio_context(audio_cues)
+                        audio_context = format_audio_context_fn(audio_cues)
                     except Exception as exc:
                         print(f"Task {task_id}: audio cues skipped: {exc}", file=sys.stderr)
 
@@ -269,6 +286,8 @@ def run_harness(input_path: Path, output_path: Path) -> int:
 
                 if should_transcribe:
                     try:
+                        from track2_captioner.transcription import transcribe_video
+
                         transcribed_count += 1
                         transcript_path = transcribe_video(
                             video_path=video_path,
@@ -279,7 +298,11 @@ def run_harness(input_path: Path, output_path: Path) -> int:
                         )
                         asset = VideoAsset(video_id=task_id, path=video_path, transcript_path=transcript_path)
                         transcript_text = transcript_path.read_text(encoding="utf-8").strip()
-                        audio_context = format_audio_context(audio_cues, transcript_text) if audio_cues else transcript_text
+                        audio_context = (
+                            format_audio_context_fn(audio_cues, transcript_text)
+                            if audio_cues and format_audio_context_fn
+                            else transcript_text
+                        )
                     except Exception as exc:
                         print(f"Task {task_id}: Whisper skipped: {exc}", file=sys.stderr)
                 elif auto_transcribe != "off":
@@ -331,7 +354,17 @@ def run_harness(input_path: Path, output_path: Path) -> int:
 def main() -> None:
     input_path = Path(os.getenv("TRACK2_INPUT", "/input/tasks.json"))
     output_path = Path(os.getenv("TRACK2_OUTPUT", "/output/results.json"))
-    raise SystemExit(run_harness(input_path, output_path))
+    try:
+        exit_code = run_harness(input_path, output_path)
+    except Exception as exc:
+        print(f"Fatal harness error: {exc}", file=sys.stderr)
+        try:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            write_results(output_path, [])
+        except Exception as output_exc:
+            print(f"Could not write fallback results to {output_path}: {output_exc}", file=sys.stderr)
+        exit_code = 0
+    raise SystemExit(exit_code)
 
 
 if __name__ == "__main__":
