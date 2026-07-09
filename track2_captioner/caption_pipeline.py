@@ -343,32 +343,14 @@ class CaptionPipeline:
         json_mode: bool = False,
     ) -> str:
         assert self.client is not None
-        try:
-            return self.client.chat(
-                self.settings.caption_model,
-                messages,
-                max_tokens=self.settings.caption_max_tokens,
-                temperature=temperature,
-                reasoning_effort=self.settings.reasoning_effort,
-                json_mode=json_mode,
-            )
-        except Exception:
-            if self.settings.caption_model == self.settings.model:
-                raise
-            logger.warning(
-                "Caption model %s failed; falling back to %s.",
-                self.settings.caption_model,
-                self.settings.model,
-                exc_info=True,
-            )
-            return self.client.chat(
-                self.settings.model,
-                messages,
-                max_tokens=self.settings.caption_max_tokens,
-                temperature=temperature,
-                reasoning_effort=self.settings.reasoning_effort,
-                json_mode=json_mode,
-            )
+        return self.client.chat(
+            self.settings.caption_model,
+            messages,
+            max_tokens=self.settings.caption_max_tokens,
+            temperature=temperature,
+            reasoning_effort=self.settings.reasoning_effort,
+            json_mode=json_mode,
+        )
 
     @staticmethod
     def _needs_style_retry(style: str, caption: str) -> bool:

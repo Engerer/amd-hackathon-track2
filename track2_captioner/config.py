@@ -39,11 +39,11 @@ def load_settings() -> Settings:
     model = (
         os.getenv("FIREWORKS_MODEL")
         or (allowed_models[0] if allowed_models else None)
-        or "accounts/fireworks/models/kimi-k2p6"
+        or "accounts/fireworks/models/qwen3p7-plus"
     )
     caption_model = (
         os.getenv("FIREWORKS_CAPTION_MODEL", "").strip()
-        or "accounts/fireworks/models/glm-5p2"
+        or "accounts/fireworks/models/qwen3p7-plus"
     )
     return Settings(
         api_key=os.getenv("FIREWORKS_API_KEY", ""),

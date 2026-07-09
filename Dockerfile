@@ -4,8 +4,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 ARG MODEL_PROXY_URL=""
-ARG FIREWORKS_MODEL="accounts/fireworks/models/kimi-k2p6"
-ARG FIREWORKS_CAPTION_MODEL="accounts/fireworks/models/glm-5p2"
+ARG FIREWORKS_MODEL="accounts/fireworks/models/qwen3p7-plus"
+ARG FIREWORKS_CAPTION_MODEL="accounts/fireworks/models/qwen3p7-plus"
 
 ENV MODEL_PROXY_URL=${MODEL_PROXY_URL} \
     FIREWORKS_MODEL=${FIREWORKS_MODEL} \
