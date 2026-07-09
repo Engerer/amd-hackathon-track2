@@ -35,6 +35,12 @@ CHECK_SCHEMA = json.dumps({
     "notes": "brief explanation",
 }, indent=2)
 
+HUMOR_NON_TECH_WORDS = {
+    "like", "honestly", "basically", "seems", "looks", "feels", "maybe", 
+    "perhaps", "probably", "instead", "trying", "somehow", "manage", "actually",
+    "except", "meanwhile", "wondering", "guess", "typical", "classic", "standard"
+}
+
 CREATIVE_STYLES = {"sarcastic", "humorous_tech", "humorous_non_tech"}
 TECH_STYLE_WORDS = {
     "api",
@@ -228,68 +234,24 @@ class CaptionPipeline:
         if self.dry_run:
             return {style: DRY_RUN_CAPTIONS[style] for style in styles}
 
-        assert self.client is not None
-        requested = [style for style in styles if style in STYLE_DESCRIPTIONS]
-        caption_request = {
-            "task": "Write all requested video captions from the factual observations.",
-            "requested_styles": requested,
-            "rules": [
-                "Return strict JSON only, with one string value per requested style.",
-                "Each caption must be one concise sentence unless the style truly needs two.",
-                "Stay grounded in the observations; do not invent locations, speech, motives, brands, or unseen actions.",
-                "Formal must be plain and objective.",
-                "Sarcastic must be clearly dry or ironic, but not mean.",
-                "Humorous_tech must include one obvious software or developer reference such as queue, bug, deploy, latency, cache, pipeline, runtime, or rollback.",
-                "Humorous_non_tech must be funny for a general audience and must not use technical jargon.",
-                "Mention the main subject, setting, and primary action when supported.",
-            ],
-            "style_descriptions": {style: STYLE_DESCRIPTIONS[style] for style in requested},
-            "observations": observations,
-            "output_schema": {style: "caption text" for style in requested},
-        }
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You write accurate, judge-friendly video captions. "
-                    "Prioritize factual grounding, clear style match, and brevity. "
-                    "Return valid JSON only."
-                ),
-            },
-            {"role": "user", "content": json.dumps(caption_request, indent=2)},
-        ]
-
-        try:
-            response = self._caption_chat(messages, self.settings.creative_temperature, json_mode=True)
-            parsed = parse_json_object(response)
-        except Exception:
-            logger.warning("Batch caption generation with JSON mode failed; retrying without JSON mode.", exc_info=True)
-            try:
-                response = self._caption_chat(messages, self.settings.creative_temperature, json_mode=False)
-                parsed = parse_json_object(response)
-            except Exception:
-                logger.warning("Batch caption generation failed.", exc_info=True)
-                parsed = {}
-
         captions: dict[str, str] = {}
-        weak_styles: list[str] = []
-        for style in styles:
-            caption = str(parsed.get(style, "")).strip().strip('"')
-            if not caption:
-                captions[style] = self._fallback_caption(style, observations)
-                weak_styles.append(style)
-                continue
-            captions[style] = caption
-            if self._needs_style_retry(style, caption):
-                weak_styles.append(style)
+        workers = min(len(styles), 4)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            future_to_style = {
+                pool.submit(self._caption, style, observations, enable_style_retry): style
+                for style in styles
+            }
+            for future in as_completed(future_to_style):
+                style = future_to_style[future]
+                try:
+                    caption = future.result()
+                    if not caption or not caption.strip():
+                        caption = self._fallback_caption(style, observations)
+                except Exception as exc:
+                    logger.warning("Generation failed for style %s: %s", style, exc, exc_info=True)
+                    caption = self._fallback_caption(style, observations)
+                captions[style] = caption
 
-        if enable_style_retry and weak_styles:
-            retry_style = weak_styles[0]
-            try:
-                captions[retry_style] = self._caption(retry_style, observations, allow_retry=False)
-            except Exception:
-                logger.warning("Caption retry failed for style %s.", retry_style, exc_info=True)
-                captions[retry_style] = self._fallback_caption(retry_style, observations)
         return captions
 
     def _caption(self, style: str, observations: dict[str, Any], allow_retry: bool = True) -> str:
@@ -359,6 +321,8 @@ class CaptionPipeline:
             return not any(word in normalized for word in TECH_STYLE_WORDS)
         if style == "sarcastic":
             return not any(marker in normalized for marker in SARCASM_STYLE_MARKERS)
+        if style == "humorous_non_tech":
+            return not any(word in normalized for word in HUMOR_NON_TECH_WORDS)
         return False
 
     @staticmethod
