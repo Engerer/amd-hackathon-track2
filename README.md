@@ -149,7 +149,8 @@ $env:AUTO_TRANSCRIBE="true"
 $env:WHISPER_MODEL="base"
 ```
 
-The submitted Docker image keeps `AUTO_TRANSCRIBE=false` by default for runtime safety. Whisper can be enabled manually with `AUTO_TRANSCRIBE=true` and `WHISPER_MODEL=tiny`.
+The submitted Docker image uses `AUTO_TRANSCRIBE=conditional` with `WHISPER_MODEL=tiny`.
+It only attempts Whisper for a small number of clips when audio is present and enough runtime remains.
 Videos without an audio stream skip Whisper and continue through the visual caption pipeline.
 
 ## Docker
@@ -229,26 +230,42 @@ Useful variables:
 TRACK2_RUNTIME_TARGET_SECONDS=540
 TRACK2_HARD_DEADLINE_SECONDS=585
 TRACK2_FRAME_PROFILE=fast
-TRACK2_MAX_FRAMES=8
+TRACK2_MAX_FRAMES=12
+TRACK2_MODEL_CALL_RESERVE_SECONDS=75
 TRACK2_ENABLE_STYLE_RETRY=false
+TRACK2_AUDIO_CUES=true
+TRACK2_AUDIO_CUE_SECONDS=20
+TRACK2_MAX_TRANSCRIBED_CLIPS=3
+TRACK2_TRANSCRIBE_MAX_DURATION_SECONDS=90
+TRACK2_TRANSCRIBE_BEFORE_SECONDS=360
 TRACK2_DRY_RUN=true
 RUN_CHECKS=true
-AUTO_TRANSCRIBE=false
+AUTO_TRANSCRIBE=conditional
 WHISPER_MODEL=tiny
 WHISPER_LANGUAGE=en
 MODEL_PROXY_URL=https://track2-fireworks-proxy.proxide-track2.workers.dev
 FIREWORKS_MODEL=accounts/fireworks/models/qwen3p7-plus
 FIREWORKS_CAPTION_MODEL=accounts/fireworks/models/qwen3p7-plus
+FIREWORKS_CAPTION_MAX_TOKENS=700
+FIREWORKS_MAX_RETRIES=1
+FIREWORKS_REQUEST_TIMEOUT_SECONDS=60
 ```
 
 Recommended final settings:
 
 ```text
 RUN_CHECKS=false
-AUTO_TRANSCRIBE=false
+AUTO_TRANSCRIBE=conditional
 TRACK2_FRAME_PROFILE=fast
-TRACK2_MAX_FRAMES=8
+TRACK2_MAX_FRAMES=12
+TRACK2_MODEL_CALL_RESERVE_SECONDS=75
 TRACK2_ENABLE_STYLE_RETRY=false
+TRACK2_AUDIO_CUES=true
+TRACK2_MAX_TRANSCRIBED_CLIPS=3
+TRACK2_TRANSCRIBE_MAX_DURATION_SECONDS=90
+FIREWORKS_CAPTION_MAX_TOKENS=700
+FIREWORKS_MAX_RETRIES=1
+FIREWORKS_REQUEST_TIMEOUT_SECONDS=60
 ```
 
 ## Prompt Tuning

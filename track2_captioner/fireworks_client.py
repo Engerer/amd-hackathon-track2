@@ -29,7 +29,8 @@ class FireworksClient:
         base_url: str,
         proxy_url: str = "",
         proxy_token: str = "",
-        max_retries: int = 5,
+        max_retries: int = 1,
+        request_timeout_seconds: float = 60.0,
     ) -> None:
         if not api_key and not proxy_url:
             raise ValueError("FIREWORKS_API_KEY or MODEL_PROXY_URL is required unless --dry-run is used.")
@@ -38,6 +39,7 @@ class FireworksClient:
         self.proxy_url = proxy_url.rstrip("/")
         self.proxy_token = proxy_token
         self.max_retries = max_retries
+        self.request_timeout_seconds = max(5.0, request_timeout_seconds)
 
     def chat(
         self,
@@ -99,7 +101,7 @@ class FireworksClient:
                 method="POST",
             )
             try:
-                with urllib.request.urlopen(request, timeout=180) as response:
+                with urllib.request.urlopen(request, timeout=self.request_timeout_seconds) as response:
                     response_payload = json.loads(response.read().decode("utf-8"))
                 return self._content_from_payload(response_payload)
             except urllib.error.HTTPError as exc:
@@ -131,7 +133,7 @@ class FireworksClient:
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
             }
-            response = requests.post(url, headers=headers, json=payload, timeout=120)
+            response = requests.post(url, headers=headers, json=payload, timeout=self.request_timeout_seconds)
             if response.status_code in RETRY_STATUS_CODES:
                 raise RetryableHTTPError(
                     response.status_code,

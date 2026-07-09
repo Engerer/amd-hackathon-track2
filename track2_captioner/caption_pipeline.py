@@ -25,6 +25,7 @@ CAPTION_SCHEMA = json.dumps({
     "visible_text": ["readable text visible in the frames, or []"],
     "actions": ["specific visible actions, or []"],
     "objects": ["important visible objects, or []"],
+    "timeline": ["brief chronological notes from the sampled frames"],
     "visual_facts": ["brief factual details used for grounding"],
     "captions": {
         "formal": "formal caption when requested",
@@ -138,6 +139,13 @@ STYLE_DESCRIPTIONS = {
     "humorous_non_tech": "Funny everyday humor for a general audience, with no technical jargon.",
 }
 
+STYLE_EXAMPLES = {
+    "formal": "A cyclist rides along a wet city street while traffic moves through the intersection.",
+    "sarcastic": "A cyclist rides through the rain, because apparently dry roads were too easy.",
+    "humorous_tech": "The cyclist deploys a rain-mode update while traffic packets route through the intersection.",
+    "humorous_non_tech": "The cyclist pedals through the rain like the weather personally challenged them.",
+}
+
 CAPTION_STYLE_ALIASES = {
     "formal": {"formal", "professional", "objective"},
     "sarcastic": {"sarcastic", "sarcasm", "dryhumor", "dryhumour", "ironic"},
@@ -193,6 +201,7 @@ class CaptionPipeline:
             settings.proxy_url,
             settings.proxy_token,
             max_retries=settings.max_retries,
+            request_timeout_seconds=settings.request_timeout_seconds,
         )
 
     def process(
@@ -204,6 +213,7 @@ class CaptionPipeline:
         enable_style_retry: bool | None = None,
         force_fallback_captions: bool = False,
         caption_fallback_deadline: float | None = None,
+        audio_context: str = "",
     ) -> dict[str, Any]:
         started_at = time.monotonic()
         timings: dict[str, float] = {}
@@ -241,6 +251,7 @@ class CaptionPipeline:
                 model_images=model_images,
                 source_frame_count=len(frames),
                 transcript=transcript,
+                audio_context=audio_context,
                 styles=selected_styles,
                 enable_style_retry=(
                     self.enable_style_retry
@@ -332,6 +343,7 @@ class CaptionPipeline:
         model_images: list[Path],
         source_frame_count: int,
         transcript: str,
+        audio_context: str,
         styles: list[str],
         enable_style_retry: bool,
     ) -> tuple[dict[str, str], dict[str, Any]]:
@@ -339,7 +351,14 @@ class CaptionPipeline:
             return {style: DRY_RUN_CAPTIONS[style] for style in styles}, dict(EMPTY_OBSERVATIONS)
 
         assert self.client is not None
-        content = self._direct_caption_content(asset, model_images, source_frame_count, transcript, styles)
+        content = self._direct_caption_content(
+            asset,
+            model_images,
+            source_frame_count,
+            transcript,
+            audio_context,
+            styles,
+        )
         response = self.client.chat(
             self.settings.model,
             [
@@ -364,6 +383,7 @@ class CaptionPipeline:
                     model_images,
                     source_frame_count,
                     transcript,
+                    audio_context,
                     styles,
                     captions,
                     issues,
@@ -381,6 +401,7 @@ class CaptionPipeline:
         model_images: list[Path],
         source_frame_count: int,
         transcript: str,
+        audio_context: str,
         styles: list[str],
     ) -> list[dict[str, Any]]:
         style_requirements = {
@@ -399,12 +420,19 @@ class CaptionPipeline:
             "task": "Generate final captions directly from the sampled video evidence.",
             "visual_input": visual_input,
             "requested_styles": style_requirements,
+            "style_examples": {
+                style: STYLE_EXAMPLES[style]
+                for style in styles
+                if style in STYLE_EXAMPLES
+            },
             "optional_transcript": transcript or "[none provided]",
+            "optional_audio_context": audio_context or "[none provided]",
             "rules": [
                 "Use the frames as the primary source of truth.",
-                "First ground the answer with description, visible_text, actions, objects, and visual_facts fields.",
+                "First ground the answer with description, visible_text, actions, objects, timeline, and visual_facts fields.",
                 "For visible_text, list only readable text that is actually visible; use [] if no text is readable.",
                 "If visible text is important, incorporate it naturally in captions as a human viewer would.",
+                "Use transcript or audio context only as supporting evidence; do not invent exact speech, music, or sounds.",
                 "Write every caption in English.",
                 "Treat frames as chronological samples from one video.",
                 "If a storyboard is provided, read frames by their numbers from left to right and top to bottom.",
@@ -414,6 +442,7 @@ class CaptionPipeline:
                 "Each caption should be one concise sentence, ideally 12 to 30 words.",
                 "For humorous_tech, use one consistent technology metaphor and include a clear tech reference such as API, bug, debug, deploy, latency, log, cache, queue, rollback, runtime, or scheduler.",
                 "For humorous_non_tech, avoid all tech, programming, AI, prompt, model, server, and software jargon.",
+                "Before returning, verify each caption includes visible subject/action/setting when possible and matches its requested style.",
                 "Never mention OCR, VLMs, AI models, prompts, frames, timestamps, storyboards, or video-analysis mechanics in the captions.",
                 "Return captions only for the requested styles.",
                 "Return strict JSON matching the schema.",
@@ -441,6 +470,7 @@ class CaptionPipeline:
         model_images: list[Path],
         source_frame_count: int,
         transcript: str,
+        audio_context: str,
         styles: list[str],
         current_captions: dict[str, str],
         issues: list[str],
@@ -463,10 +493,12 @@ class CaptionPipeline:
                 if style in STYLE_DESCRIPTIONS
             },
             "optional_transcript": transcript or "[none provided]",
+            "optional_audio_context": audio_context or "[none provided]",
             "rules": [
                 "Keep only visible or transcript-backed facts.",
                 "Write every caption in English.",
                 "Fix only missing, weakly styled, overlong, or jargon-violating captions.",
+                "Use audio context only as supporting evidence, not as a source for invented details.",
                 "If visible text is important, incorporate it naturally without saying OCR or analysis.",
                 "For humorous_tech, keep one consistent technology metaphor.",
                 "Never mention OCR, VLMs, AI models, prompts, frames, timestamps, storyboards, or video-analysis mechanics in the captions.",
