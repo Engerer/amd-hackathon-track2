@@ -21,13 +21,17 @@ from track2_captioner.video_ingest import DEFAULT_FRAME_PROFILE, DEFAULT_MAX_FRA
 logger = logging.getLogger(__name__)
 
 CAPTION_SCHEMA = json.dumps({
+    "description": "1-2 sentence neutral description of the sampled video evidence",
+    "visible_text": ["readable text visible in the frames, or []"],
+    "actions": ["specific visible actions, or []"],
+    "objects": ["important visible objects, or []"],
+    "visual_facts": ["brief factual details used for grounding"],
     "captions": {
         "formal": "formal caption when requested",
         "sarcastic": "sarcastic caption when requested",
         "humorous_tech": "humorous technology caption when requested",
         "humorous_non_tech": "humorous non-technical caption when requested",
     },
-    "visual_facts": ["brief factual details used for grounding"],
 }, indent=2)
 
 CHECK_SCHEMA = json.dumps({
@@ -39,7 +43,7 @@ CHECK_SCHEMA = json.dumps({
 DIRECT_CAPTION_SYSTEM = (
     "You are a direct multimodal video captioning agent. "
     "Inspect the sampled video frames in chronological order and generate final captions directly. "
-    "Do not write an intermediate observation report. Return strict JSON only."
+    "Use compact grounding fields for accuracy, then write the captions. Return strict JSON only."
 )
 STORYBOARD_COLUMNS = 4
 STORYBOARD_THUMB_WIDTH = 360
@@ -127,8 +131,43 @@ DRY_RUN_CAPTIONS = {
 STYLE_DESCRIPTIONS = {
     "formal": "Professional, objective, factual tone. No jokes, slang, sarcasm, or embellishment.",
     "sarcastic": "Dry, ironic, lightly mocking tone while staying true to the visible video.",
-    "humorous_tech": "Funny with technology or programming references, while staying grounded in the frames.",
+    "humorous_tech": (
+        "Funny through one consistent technology metaphor, such as APIs, debugging, game engines, "
+        "networking, robotics, queues, deploys, or runtime behavior. Do not mix unrelated metaphors."
+    ),
     "humorous_non_tech": "Funny everyday humor for a general audience, with no technical jargon.",
+}
+
+CAPTION_STYLE_ALIASES = {
+    "formal": {"formal", "professional", "objective"},
+    "sarcastic": {"sarcastic", "sarcasm", "dryhumor", "dryhumour", "ironic"},
+    "humorous_tech": {
+        "humoroustech",
+        "humoroustechnical",
+        "humoroustechnology",
+        "techhumor",
+        "techhumour",
+        "technicalhumor",
+        "technicalhumour",
+        "technologyhumor",
+        "technologyhumour",
+        "funnytech",
+        "tech",
+    },
+    "humorous_non_tech": {
+        "humorousnontech",
+        "humorousnontechnical",
+        "humorousnontechnology",
+        "nontechhumor",
+        "nontechhumour",
+        "nontechnicalhumor",
+        "nontechnicalhumour",
+        "everydayhumor",
+        "everydayhumour",
+        "generalhumor",
+        "generalhumour",
+        "funny",
+    },
 }
 
 
@@ -363,6 +402,9 @@ class CaptionPipeline:
             "optional_transcript": transcript or "[none provided]",
             "rules": [
                 "Use the frames as the primary source of truth.",
+                "First ground the answer with description, visible_text, actions, objects, and visual_facts fields.",
+                "For visible_text, list only readable text that is actually visible; use [] if no text is readable.",
+                "If visible text is important, incorporate it naturally in captions as a human viewer would.",
                 "Write every caption in English.",
                 "Treat frames as chronological samples from one video.",
                 "If a storyboard is provided, read frames by their numbers from left to right and top to bottom.",
@@ -370,8 +412,9 @@ class CaptionPipeline:
                 "Use only visible or transcript-backed facts; do not invent motives, identities, locations, speech, or hidden context.",
                 "Never turn uncertainty into a concrete claim.",
                 "Each caption should be one concise sentence, ideally 12 to 30 words.",
-                "For humorous_tech, include a clear tech reference such as API, bug, debug, deploy, latency, log, cache, pipeline, queue, rollback, runtime, or scheduler.",
+                "For humorous_tech, use one consistent technology metaphor and include a clear tech reference such as API, bug, debug, deploy, latency, log, cache, queue, rollback, runtime, or scheduler.",
                 "For humorous_non_tech, avoid all tech, programming, AI, prompt, model, server, and software jargon.",
+                "Never mention OCR, VLMs, AI models, prompts, frames, timestamps, storyboards, or video-analysis mechanics in the captions.",
                 "Return captions only for the requested styles.",
                 "Return strict JSON matching the schema.",
             ],
@@ -424,6 +467,9 @@ class CaptionPipeline:
                 "Keep only visible or transcript-backed facts.",
                 "Write every caption in English.",
                 "Fix only missing, weakly styled, overlong, or jargon-violating captions.",
+                "If visible text is important, incorporate it naturally without saying OCR or analysis.",
+                "For humorous_tech, keep one consistent technology metaphor.",
+                "Never mention OCR, VLMs, AI models, prompts, frames, timestamps, storyboards, or video-analysis mechanics in the captions.",
                 "Return one concise caption for every requested style.",
                 "Return strict JSON matching the schema.",
             ],
@@ -456,15 +502,30 @@ class CaptionPipeline:
         if not isinstance(payload, dict):
             return {}
 
+        normalized_payload: dict[str, Any] = {}
+        for key, value in payload.items():
+            normalized_key = CaptionPipeline._normalize_caption_key(str(key))
+            if normalized_key:
+                normalized_payload.setdefault(normalized_key, value)
+
         captions: dict[str, str] = {}
         for style in styles:
             value = payload.get(style)
+            if value is None:
+                for alias in CAPTION_STYLE_ALIASES.get(style, {style}):
+                    value = normalized_payload.get(CaptionPipeline._normalize_caption_key(alias))
+                    if value is not None:
+                        break
             if isinstance(value, dict):
                 value = value.get("caption") or value.get("text")
             caption = CaptionPipeline._clean_caption(str(value or ""))
             if caption:
                 captions[style] = caption
         return captions
+
+    @staticmethod
+    def _normalize_caption_key(key: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "", key.lower())
 
     def _sanitize_caption_map(
         self,
@@ -479,23 +540,41 @@ class CaptionPipeline:
 
     @staticmethod
     def _observations_from_direct_response(parsed: dict[str, Any]) -> dict[str, Any]:
-        facts = parsed.get("visual_facts") or parsed.get("facts") or []
-        if isinstance(facts, str):
-            facts = [facts]
-        if not isinstance(facts, list):
-            facts = []
-        summary = str(parsed.get("summary") or "Captions were generated directly from sampled frames.").strip()
+        visible_text = CaptionPipeline._string_list_from_keys(parsed, ["visible_text", "ocr", "text"])
+        actions = CaptionPipeline._string_list_from_keys(parsed, ["actions", "visible_actions"])
+        objects = CaptionPipeline._string_list_from_keys(parsed, ["objects", "key_objects", "subjects"])
+        facts = CaptionPipeline._string_list_from_keys(parsed, ["visual_facts", "facts"])
+        if not facts:
+            facts = [*objects[:3], *actions[:3], *visible_text[:2]]
+        summary = str(
+            parsed.get("description")
+            or parsed.get("summary")
+            or "Captions were generated directly from sampled frames."
+        ).strip()
         return {
             "summary": summary,
             "setting": str(parsed.get("setting") or "inferred from sampled frames").strip(),
-            "subjects": [str(item) for item in parsed.get("subjects", [])] if isinstance(parsed.get("subjects"), list) else [],
+            "subjects": CaptionPipeline._string_list_from_keys(parsed, ["subjects"]),
             "key_objects": [str(item) for item in facts[:8]],
-            "actions": [str(item) for item in parsed.get("actions", [])] if isinstance(parsed.get("actions"), list) else [],
-            "timeline": [str(item) for item in parsed.get("timeline", [])] if isinstance(parsed.get("timeline"), list) else [],
-            "visible_text": [str(item) for item in parsed.get("visible_text", [])] if isinstance(parsed.get("visible_text"), list) else [],
-            "audio_or_speech": [str(item) for item in parsed.get("audio_or_speech", [])] if isinstance(parsed.get("audio_or_speech"), list) else [],
+            "actions": actions,
+            "timeline": CaptionPipeline._string_list_from_keys(parsed, ["timeline"]),
+            "visible_text": visible_text,
+            "audio_or_speech": CaptionPipeline._string_list_from_keys(parsed, ["audio_or_speech", "speech", "transcript"]),
             "uncertainties": ["Direct mode uses one multimodal caption call instead of a separate observation pass."],
         }
+
+    @staticmethod
+    def _string_list_from_keys(payload: dict[str, Any], keys: list[str]) -> list[str]:
+        for key in keys:
+            value = payload.get(key)
+            if value:
+                if isinstance(value, list):
+                    return [str(item).strip() for item in value if str(item).strip()]
+                if isinstance(value, str):
+                    cleaned = value.strip()
+                    if cleaned:
+                        return [cleaned]
+        return []
 
     @staticmethod
     def _clean_caption(response: str) -> str:
