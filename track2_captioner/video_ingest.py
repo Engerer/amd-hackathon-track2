@@ -18,8 +18,9 @@ MAX_VIDEO_DURATION_SECONDS = 240.0
 DURATION_TOLERANCE_SECONDS = 0.5
 ABSOLUTE_MAX_FRAMES = 20
 DEFAULT_MAX_FRAMES = 15
-DEFAULT_FRAME_PROFILE = "fast"
+DEFAULT_FRAME_PROFILE = "hybrid"
 FAST_FRAME_PROFILES = {"fast", "storyboard"}
+HYBRID_FRAME_PROFILES = {"hybrid", "accuracy"}
 
 
 class VideoDurationError(ValueError):
@@ -246,7 +247,7 @@ def compute_dynamic_frame_count(
     if duration_seconds is None or duration_seconds <= 0:
         return cap
     profile = (frame_profile or DEFAULT_FRAME_PROFILE).lower()
-    if profile in FAST_FRAME_PROFILES:
+    if profile in FAST_FRAME_PROFILES or profile in HYBRID_FRAME_PROFILES:
         return min(15, cap)
     if profile != "balanced":
         return cap
@@ -335,11 +336,20 @@ def _candidate_score(gray: Any, previous_gray: Any | None) -> tuple[float, float
     brightness_score = max(0.0, 1.0 - (abs(brightness - 127.0) / 127.0))
     sharpness_score = _normalize_score(sharpness, 500.0)
     motion_score = _normalize_score(motion, 45.0)
-    score = (sharpness_score * 0.35) + (brightness_score * 0.25) + (motion_score * 0.40)
+    sharp_motion_score = motion_score * (0.35 + (sharpness_score * 0.65))
+    score = (sharpness_score * 0.50) + (brightness_score * 0.20) + (sharp_motion_score * 0.30)
     return score, sharpness, brightness, motion
 
 
-def _compute_candidate_count(duration: float | None, final_count: int) -> int:
+def _compute_candidate_count(
+    duration: float | None,
+    final_count: int,
+    frame_profile: str,
+) -> int:
+    profile = (frame_profile or DEFAULT_FRAME_PROFILE).lower()
+    if profile in HYBRID_FRAME_PROFILES:
+        duration_candidates = math.ceil(duration * 0.3) if duration and duration > 0 else 0
+        return min(42, max(final_count * 2, duration_candidates))
     if duration is None or duration <= 0:
         return min(72, max(final_count * 4, 48))
     return min(72, max(final_count * 4, math.ceil(duration * 0.5)))
@@ -361,30 +371,26 @@ def _select_adaptive_candidates(
     duration: float,
     final_count: int,
 ) -> list[FrameCandidate]:
+    """Keep broad timeline coverage, then fill remaining slots with sharp salient frames."""
     selected: dict[float, FrameCandidate] = {}
-    _add_candidate_once(selected, _closest_candidate(candidates, min(0.5, duration * 0.05)))
-    _add_candidate_once(selected, _closest_candidate(candidates, duration / 2))
-    _add_candidate_once(selected, _closest_candidate(candidates, max(duration - 0.5, 0)))
+    anchor_count = max(3, min(final_count, math.ceil(final_count * (2 / 3))))
+    for timestamp in _sample_timestamps(duration, anchor_count):
+        _add_candidate_once(selected, _closest_candidate(candidates, timestamp))
 
-    segment_count = min(final_count, 6 if duration > 75 else 5)
-    for index in range(segment_count):
-        start = duration * (index / segment_count)
-        end = duration * ((index + 1) / segment_count)
-        segment = [
-            candidate for candidate in candidates
-            if start <= candidate.timestamp <= end
-        ]
-        if segment:
-            _add_candidate_once(selected, max(segment, key=lambda candidate: candidate.score))
-
-    min_gap = max(duration / max(final_count * 2.5, 1), 0.75)
+    min_gap = max(duration / max(final_count * 3.0, 1), 0.5)
     for candidate in sorted(candidates, key=lambda item: item.score, reverse=True):
         if len(selected) >= final_count:
             break
         too_close = any(abs(candidate.timestamp - kept.timestamp) < min_gap for kept in selected.values())
-        too_similar = any(_hamming_distance(candidate.hash_value, kept.hash_value) < 5 for kept in selected.values())
-        if not too_close and not too_similar:
+        if not too_close:
             selected[candidate.timestamp] = candidate
+
+    if len(selected) < final_count:
+        for timestamp in _sample_timestamps(duration, final_count):
+            if len(selected) >= final_count:
+                break
+            candidate = _closest_candidate(candidates, timestamp)
+            _add_candidate_once(selected, candidate)
 
     if len(selected) < final_count:
         for candidate in sorted(candidates, key=lambda item: item.score, reverse=True):
@@ -420,7 +426,7 @@ def _extract_adaptive_frames_opencv(
             return []
 
         final_count = compute_dynamic_frame_count(duration, max_frames, frame_profile)
-        candidate_count = _compute_candidate_count(duration, final_count)
+        candidate_count = _compute_candidate_count(duration, final_count, frame_profile)
         timestamps = _sample_timestamps(duration, candidate_count)
         if not timestamps:
             return []
@@ -524,7 +530,22 @@ def extract_frames(
     effective_max = compute_dynamic_frame_count(duration, max_frames, frame_profile)
     profile = (frame_profile or DEFAULT_FRAME_PROFILE).lower()
 
-    if profile in FAST_FRAME_PROFILES:
+    if profile in HYBRID_FRAME_PROFILES:
+        try:
+            hybrid_frames = _extract_adaptive_frames_opencv(
+                video_path,
+                frame_dir / "hybrid",
+                effective_max,
+                width,
+                frame_profile,
+            )
+            if hybrid_frames:
+                logger.info("Hybrid selection: kept %d frames.", len(hybrid_frames))
+                return hybrid_frames
+        except Exception:
+            logger.warning("Hybrid OpenCV selection failed; using timeline fallback.", exc_info=True)
+
+    if profile in FAST_FRAME_PROFILES or profile in HYBRID_FRAME_PROFILES:
         try:
             fast_frames = _extract_timestamp_frames_opencv(
                 video_path,
@@ -533,14 +554,14 @@ def extract_frames(
                 width,
             )
             if fast_frames:
-                logger.info("Fast timestamp selection: kept %d frames.", len(fast_frames))
-                return deduplicate_frames(fast_frames)
+                logger.info("Timeline selection: kept %d frames.", len(fast_frames))
+                return fast_frames
         except Exception:
             logger.warning("Fast OpenCV frame selection failed; using ffmpeg fallback.", exc_info=True)
 
         anchor_frames = _extract_anchor_frames(video_path, frame_dir / "anchor", effective_max, width)
         if anchor_frames:
-            return deduplicate_frames(anchor_frames)
+            return anchor_frames
 
     try:
         adaptive_frames = _extract_adaptive_frames_opencv(
@@ -559,19 +580,19 @@ def extract_frames(
     scene_frames = _extract_scene_frames(video_path, frame_dir / "scene", effective_max, width)
     minimum_scene_frames = max(3, min(effective_max, effective_max // 2))
     if len(scene_frames) >= minimum_scene_frames:
-        return deduplicate_frames(scene_frames)
+        return scene_frames
 
     minimum_frames = max(1, min(effective_max, 3))
     anchor_frames = _extract_anchor_frames(video_path, frame_dir / "anchor", effective_max, width)
     if len(anchor_frames) >= minimum_frames:
-        return deduplicate_frames(anchor_frames)
+        return anchor_frames
 
     uniform_frames = _extract_uniform_frames(video_path, frame_dir / "uniform", effective_max, width)
     if uniform_frames:
-        return deduplicate_frames(uniform_frames)
+        return uniform_frames
 
     if anchor_frames:
-        return deduplicate_frames(anchor_frames)
+        return anchor_frames
 
     if not uniform_frames:
         raise RuntimeError(f"Could not extract frames from {video_path}")

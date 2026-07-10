@@ -23,15 +23,16 @@ https://github.com/Engerer/amd-hackathon-track2
 
 ## How It Works
 
-The pipeline samples timeline evidence instead of processing every video frame. By default it uses OpenCV to scan low-resolution candidate frames, then keeps a diverse 14-18 frame evidence pack with beginning, middle, and end coverage.
+The pipeline samples timeline evidence instead of processing every video frame. By default it keeps 10 uniformly distributed timeline anchors and adds 5 sharp, salient frames selected from a lightweight OpenCV candidate scan.
 
 ```text
 video URL
  -> download video
  -> ffprobe checks duration
- -> OpenCV scores candidate frames for motion, scene change, sharpness, brightness, and diversity
+ -> OpenCV preserves timeline anchors and scores extra candidates for sharpness, exposure, and motion
  -> resize each frame to 768px width
- -> Qwen3.7 Plus receives the sampled frames directly
+ -> build one overview storyboard and select three higher-resolution detail frames
+ -> Qwen3.7 Plus receives the overview and details directly
  -> Qwen3.7 Plus writes all requested style captions in one multimodal JSON call
  -> Docker writes /output/results.json
 ```
@@ -50,20 +51,22 @@ The Qwen3.7 call receives image frames and returns captions directly:
 }
 ```
 
-If one style is missing or too weak, the pipeline retries a direct multimodal repair call with the frames again while protecting the 10-minute runtime.
+The prompt establishes one shared factual core before generating all four styles, so humor changes tone without changing the visible subject, action, or setting. Optional style repair remains available for local experiments but is disabled in the timed submission.
 
 ## Defaults
 
 - Direct multimodal model: `accounts/fireworks/models/qwen3p7-plus`
 - Caption model setting: also `accounts/fireworks/models/qwen3p7-plus` for compatibility
-- Frame sampling: adaptive OpenCV candidate selection
-- Frame cap: `18` total frames per video by default, hard-capped at `20`
+- Frame sampling: hybrid timeline anchors plus sharp salient candidates
+- Frame cap: `15` total frames per video by default, hard-capped at `20`
 - Frame width: `768px`
+- Model input: one 15-frame overview plus three high-resolution detail images
 - Whisper audio transcription: off by default in Docker
+- Volume-only audio cues: off by default in Docker
 - Internal judge checks: off by default
 - Fireworks key: stored in a Cloudflare Worker secret, not in the repo
 
-Important: `18` is a safety cap, not 18 FPS. A 30-45 second video gives up to 14 selected frames, 45-75 seconds gives up to 16, and 75-120 seconds gives up to 18.
+Important: `15` is a total-frame cap, not 15 FPS. Perceptual deduplication is not applied to the timed path, so fixed-camera clips retain their complete timeline coverage.
 
 ## Quick Start
 
@@ -149,9 +152,7 @@ $env:AUTO_TRANSCRIBE="true"
 $env:WHISPER_MODEL="base"
 ```
 
-The submitted Docker image uses `AUTO_TRANSCRIBE=conditional` with `WHISPER_MODEL=tiny`.
-It only attempts Whisper for a small number of clips when audio is present and enough runtime remains.
-Videos without an audio stream skip Whisper and continue through the visual caption pipeline.
+The submitted Docker image keeps `AUTO_TRANSCRIBE=off` and does not install Whisper, avoiding the large Torch dependency and CPU transcription cost. Local experiments can still enable it explicitly.
 
 ## Docker
 
@@ -229,54 +230,50 @@ Useful variables:
 ```text
 TRACK2_RUNTIME_TARGET_SECONDS=540
 TRACK2_HARD_DEADLINE_SECONDS=585
-TRACK2_FRAME_PROFILE=fast
+TRACK2_FRAME_PROFILE=hybrid
 TRACK2_MAX_FRAMES=15
 TRACK2_MODEL_CALL_RESERVE_SECONDS=75
 TRACK2_ENABLE_STYLE_RETRY=false
-TRACK2_AUDIO_CUES=true
+TRACK2_AUDIO_CUES=false
 TRACK2_AUDIO_CUE_SECONDS=20
 TRACK2_MAX_TRANSCRIBED_CLIPS=3
 TRACK2_TRANSCRIBE_MAX_DURATION_SECONDS=90
 TRACK2_TRANSCRIBE_BEFORE_SECONDS=360
 TRACK2_DRY_RUN=true
 RUN_CHECKS=true
-AUTO_TRANSCRIBE=conditional
+AUTO_TRANSCRIBE=off
 WHISPER_MODEL=tiny
 WHISPER_LANGUAGE=en
 MODEL_PROXY_URL=https://track2-fireworks-proxy.proxide-track2.workers.dev
 FIREWORKS_MODEL=accounts/fireworks/models/qwen3p7-plus
 FIREWORKS_CAPTION_MODEL=accounts/fireworks/models/qwen3p7-plus
 FIREWORKS_CAPTION_MAX_TOKENS=700
+FIREWORKS_CREATIVE_TEMPERATURE=0.45
 FIREWORKS_MAX_RETRIES=1
-FIREWORKS_REQUEST_TIMEOUT_SECONDS=60
+FIREWORKS_REQUEST_TIMEOUT_SECONDS=28
 ```
 
 Recommended final settings:
 
 ```text
 RUN_CHECKS=false
-AUTO_TRANSCRIBE=conditional
-TRACK2_FRAME_PROFILE=fast
+AUTO_TRANSCRIBE=off
+TRACK2_FRAME_PROFILE=hybrid
 TRACK2_MAX_FRAMES=15
 TRACK2_MODEL_CALL_RESERVE_SECONDS=75
 TRACK2_ENABLE_STYLE_RETRY=false
-TRACK2_AUDIO_CUES=true
-TRACK2_MAX_TRANSCRIBED_CLIPS=3
+TRACK2_AUDIO_CUES=false
+TRACK2_MAX_TRANSCRIBED_CLIPS=0
 TRACK2_TRANSCRIBE_MAX_DURATION_SECONDS=90
 FIREWORKS_CAPTION_MAX_TOKENS=700
+FIREWORKS_CREATIVE_TEMPERATURE=0.45
 FIREWORKS_MAX_RETRIES=1
-FIREWORKS_REQUEST_TIMEOUT_SECONDS=60
+FIREWORKS_REQUEST_TIMEOUT_SECONDS=28
 ```
 
 ## Prompt Tuning
 
-Prompt files live in:
-
-```text
-prompts/
-```
-
-Tune prompts when captions hallucinate details, miss the required style, or become too long.
+The production multimodal prompt, factual-core schema, and concise style templates live in `track2_captioner/caption_pipeline.py`. The files under `prompts/` support optional local judging and legacy single-style workflows.
 
 ## Security
 

@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter, ImageStat
 
 from track2_captioner.config import Settings
 from track2_captioner.fireworks_client import FireworksClient, image_to_data_url
@@ -21,12 +21,19 @@ from track2_captioner.video_ingest import DEFAULT_FRAME_PROFILE, DEFAULT_MAX_FRA
 logger = logging.getLogger(__name__)
 
 CAPTION_SCHEMA = json.dumps({
+    "core_facts": {
+        "subject": "main visible subject, using generic wording if uncertain",
+        "action": "main visible action or state",
+        "setting": "visible setting without guessing a specific location",
+        "important_objects": ["objects that matter to the caption"],
+    },
     "description": "1-2 sentence neutral description of the sampled video evidence",
     "visible_text": ["readable text visible in the frames, or []"],
     "actions": ["specific visible actions, or []"],
     "objects": ["important visible objects, or []"],
     "timeline": ["brief chronological notes from the sampled frames"],
     "visual_facts": ["brief factual details used for grounding"],
+    "uncertainties": ["details that should not become concrete caption claims"],
     "captions": {
         "formal": "formal caption when requested",
         "sarcastic": "sarcastic caption when requested",
@@ -44,10 +51,11 @@ CHECK_SCHEMA = json.dumps({
 DIRECT_CAPTION_SYSTEM = (
     "You are a direct multimodal video captioning agent. "
     "Inspect the sampled video frames in chronological order and generate final captions directly. "
-    "Use compact grounding fields for accuracy, then write the captions. Return strict JSON only."
+    "Establish one shared factual core before writing any styled captions. Return strict JSON only."
 )
 STORYBOARD_COLUMNS = 4
 STORYBOARD_THUMB_WIDTH = 360
+DETAIL_IMAGE_COUNT = 3
 
 HUMOR_NON_TECH_WORDS = {
     "actually",
@@ -139,11 +147,11 @@ STYLE_DESCRIPTIONS = {
     "humorous_non_tech": "Funny everyday humor for a general audience, with no technical jargon.",
 }
 
-STYLE_EXAMPLES = {
-    "formal": "A cyclist rides along a wet city street while traffic moves through the intersection.",
-    "sarcastic": "A cyclist rides through the rain, because apparently dry roads were too easy.",
-    "humorous_tech": "The cyclist deploys a rain-mode update while traffic packets route through the intersection.",
-    "humorous_non_tech": "The cyclist pedals through the rain like the weather personally challenged them.",
+STYLE_TEMPLATES = {
+    "formal": "State the shared factual core plainly and objectively.",
+    "sarcastic": "State the shared factual core, then add a short dry ironic aside about only the visible action.",
+    "humorous_tech": "State the shared factual core through one concise technology metaphor without adding events.",
+    "humorous_non_tech": "State the shared factual core with one everyday joke or comparison and no technical language.",
 }
 
 CAPTION_STYLE_ALIASES = {
@@ -284,16 +292,40 @@ class CaptionPipeline:
         }
 
     def _prepare_model_images(self, frames: list[Path], frame_dir: Path) -> list[Path]:
-        if len(frames) <= 1:
+        if len(frames) <= 4:
             return frames
 
         storyboard_path = frame_dir / "storyboard" / "storyboard.jpg"
         try:
             self._build_storyboard(frames, storyboard_path)
-            return [storyboard_path]
+            detail_frames = self._select_detail_frames(frames, DETAIL_IMAGE_COUNT)
+            return [storyboard_path, *detail_frames]
         except Exception:
             logger.warning("Storyboard build failed; falling back to individual frames.", exc_info=True)
             return frames
+
+    @staticmethod
+    def _select_detail_frames(frames: list[Path], count: int) -> list[Path]:
+        if count <= 0 or not frames:
+            return []
+
+        selected: list[Path] = []
+        segment_count = min(count, len(frames))
+        for segment_index in range(segment_count):
+            start = round(len(frames) * (segment_index / segment_count))
+            end = round(len(frames) * ((segment_index + 1) / segment_count))
+            segment = frames[start:max(start + 1, end)]
+            selected.append(max(segment, key=CaptionPipeline._detail_frame_quality))
+        return selected
+
+    @staticmethod
+    def _detail_frame_quality(frame_path: Path) -> float:
+        with Image.open(frame_path) as image:
+            gray = image.convert("L").resize((256, 144), Image.Resampling.BILINEAR)
+            brightness = float(ImageStat.Stat(gray).mean[0])
+            edge_variance = float(ImageStat.Stat(gray.filter(ImageFilter.FIND_EDGES)).var[0])
+        exposure = max(0.2, 1.0 - (abs(brightness - 127.0) / 127.0))
+        return edge_variance * exposure
 
     @staticmethod
     def _build_storyboard(frames: list[Path], output_path: Path) -> None:
@@ -328,7 +360,7 @@ class CaptionPipeline:
                 [x, y, x + STORYBOARD_THUMB_WIDTH, y + label_height],
                 fill=(24, 24, 24),
             )
-            draw.text((x + 8, y + 6), f"Frame {index + 1}", fill=(255, 255, 255))
+            draw.text((x + 8, y + 6), f"Frame {index + 1}/{len(loaded)}", fill=(255, 255, 255))
             paste_y = y + label_height
             if image.height < thumb_height:
                 paste_y += (thumb_height - image.height) // 2
@@ -409,27 +441,26 @@ class CaptionPipeline:
             for style in styles
             if style in STYLE_DESCRIPTIONS
         }
-        visual_input = (
-            f"The attached image is a storyboard containing {source_frame_count} sampled "
-            "video frames in chronological order, numbered left-to-right and top-to-bottom."
-            if len(model_images) == 1 and source_frame_count > 1
-            else "The attached images are sampled video frames in chronological order."
-        )
+        visual_input = self._visual_input_description(model_images, source_frame_count)
         request = {
             "video_id": asset.video_id,
             "task": "Generate final captions directly from the sampled video evidence.",
             "visual_input": visual_input,
             "requested_styles": style_requirements,
-            "style_examples": {
-                style: STYLE_EXAMPLES[style]
+            "style_templates": {
+                style: STYLE_TEMPLATES[style]
                 for style in styles
-                if style in STYLE_EXAMPLES
+                if style in STYLE_TEMPLATES
             },
             "optional_transcript": transcript or "[none provided]",
             "optional_audio_context": audio_context or "[none provided]",
             "rules": [
                 "Use the frames as the primary source of truth.",
-                "First ground the answer with description, visible_text, actions, objects, timeline, and visual_facts fields.",
+                "First establish one core_facts object containing the shared subject, action, setting, and important objects.",
+                "Every styled caption must preserve the same core subject, action, and setting; style may change wording but not facts.",
+                "Begin each caption with a recognizable factual clause before adding sarcasm or humor.",
+                "A humorous or sarcastic clause must not introduce new visible nouns, actions, speech, motives, or locations.",
+                "Also return description, visible_text, actions, objects, timeline, visual_facts, and uncertainties as compact grounding fields.",
                 "For visible_text, list only readable text that is actually visible; use [] if no text is readable.",
                 "If visible text is important, incorporate it naturally in captions as a human viewer would.",
                 "Use transcript or audio context only as supporting evidence; do not invent exact speech, music, or sounds.",
@@ -464,6 +495,23 @@ class CaptionPipeline:
             )
         return content
 
+    @staticmethod
+    def _visual_input_description(model_images: list[Path], source_frame_count: int) -> str:
+        if source_frame_count <= 1:
+            return "The attached image is one sampled video frame."
+        if len(model_images) > 1:
+            return (
+                f"The first attached image is an overview storyboard containing {source_frame_count} "
+                "chronological frames, numbered left-to-right and top-to-bottom. The remaining "
+                f"{len(model_images) - 1} images are higher-resolution detail views selected from "
+                "early, middle, and late portions of that same storyboard; they repeat evidence and "
+                "are not additional moments."
+            )
+        return (
+            f"The attached image is a storyboard containing {source_frame_count} sampled video "
+            "frames in chronological order, numbered left-to-right and top-to-bottom."
+        )
+
     def _retry_direct_captions(
         self,
         asset: VideoAsset,
@@ -481,12 +529,7 @@ class CaptionPipeline:
             "task": "Repair the direct video captions using the frames again.",
             "issues": issues,
             "current_captions": current_captions,
-            "visual_input": (
-                f"The attached image is a storyboard containing {source_frame_count} sampled "
-                "video frames in chronological order, numbered left-to-right and top-to-bottom."
-                if len(model_images) == 1 and source_frame_count > 1
-                else "The attached images are sampled video frames in chronological order."
-            ),
+            "visual_input": self._visual_input_description(model_images, source_frame_count),
             "requested_styles": {
                 style: STYLE_DESCRIPTIONS[style]
                 for style in styles
@@ -496,6 +539,8 @@ class CaptionPipeline:
             "optional_audio_context": audio_context or "[none provided]",
             "rules": [
                 "Keep only visible or transcript-backed facts.",
+                "Preserve one identical factual subject, action, and setting across all styles.",
+                "Put the factual clause first; style wording must not introduce new events or objects.",
                 "Write every caption in English.",
                 "Fix only missing, weakly styled, overlong, or jargon-violating captions.",
                 "Use audio context only as supporting evidence, not as a source for invented details.",
@@ -572,27 +617,47 @@ class CaptionPipeline:
 
     @staticmethod
     def _observations_from_direct_response(parsed: dict[str, Any]) -> dict[str, Any]:
-        visible_text = CaptionPipeline._string_list_from_keys(parsed, ["visible_text", "ocr", "text"])
-        actions = CaptionPipeline._string_list_from_keys(parsed, ["actions", "visible_actions"])
-        objects = CaptionPipeline._string_list_from_keys(parsed, ["objects", "key_objects", "subjects"])
+        core = parsed.get("core_facts")
+        if not isinstance(core, dict):
+            core = {}
+        visible_text = (
+            CaptionPipeline._string_list_from_keys(parsed, ["visible_text", "ocr", "text"])
+            or CaptionPipeline._string_list_from_keys(core, ["visible_text", "text"])
+        )
+        actions = (
+            CaptionPipeline._string_list_from_keys(parsed, ["actions", "visible_actions"])
+            or CaptionPipeline._string_list_from_keys(core, ["action", "actions"])
+        )
+        subjects = (
+            CaptionPipeline._string_list_from_keys(parsed, ["subjects"])
+            or CaptionPipeline._string_list_from_keys(core, ["subject", "subjects"])
+        )
+        objects = (
+            CaptionPipeline._string_list_from_keys(parsed, ["objects", "key_objects", "subjects"])
+            or CaptionPipeline._string_list_from_keys(core, ["important_objects", "objects", "subject"])
+        )
         facts = CaptionPipeline._string_list_from_keys(parsed, ["visual_facts", "facts"])
         if not facts:
             facts = [*objects[:3], *actions[:3], *visible_text[:2]]
         summary = str(
             parsed.get("description")
             or parsed.get("summary")
+            or core.get("summary")
             or "Captions were generated directly from sampled frames."
         ).strip()
         return {
             "summary": summary,
-            "setting": str(parsed.get("setting") or "inferred from sampled frames").strip(),
-            "subjects": CaptionPipeline._string_list_from_keys(parsed, ["subjects"]),
+            "setting": str(core.get("setting") or parsed.get("setting") or "inferred from sampled frames").strip(),
+            "subjects": subjects,
             "key_objects": [str(item) for item in facts[:8]],
             "actions": actions,
             "timeline": CaptionPipeline._string_list_from_keys(parsed, ["timeline"]),
             "visible_text": visible_text,
             "audio_or_speech": CaptionPipeline._string_list_from_keys(parsed, ["audio_or_speech", "speech", "transcript"]),
-            "uncertainties": ["Direct mode uses one multimodal caption call instead of a separate observation pass."],
+            "uncertainties": (
+                CaptionPipeline._string_list_from_keys(parsed, ["uncertainties", "uncertain"])
+                or ["Direct mode uses one multimodal caption call instead of a separate observation pass."]
+            ),
         }
 
     @staticmethod

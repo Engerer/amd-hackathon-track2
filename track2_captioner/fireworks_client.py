@@ -79,7 +79,7 @@ class FireworksClient:
         from tenacity import RetryError, before_sleep_log, retry, retry_if_exception_type, stop_after_attempt, wait_exponential_jitter
 
         @retry(
-            stop=stop_after_attempt(self.max_retries),
+            stop=stop_after_attempt(self.max_retries + 1),
             wait=wait_exponential_jitter(initial=1, max=32, jitter=2),
             retry=retry_if_exception_type((RetryableHTTPError, TimeoutError, urllib.error.URLError)),
             before_sleep=before_sleep_log(logger, logging.WARNING),
@@ -113,7 +113,7 @@ class FireworksClient:
         try:
             return _call()
         except RetryError as exc:
-            raise RuntimeError(f"Proxy request failed after {self.max_retries} retries") from exc
+            raise RuntimeError(f"Proxy request failed after {self.max_retries + 1} attempts") from exc
 
     # ── Direct Fireworks path ───────────────────────────────────────────
 
@@ -121,7 +121,7 @@ class FireworksClient:
         from tenacity import RetryError, before_sleep_log, retry, retry_if_exception_type, stop_after_attempt, wait_exponential_jitter
 
         @retry(
-            stop=stop_after_attempt(self.max_retries),
+            stop=stop_after_attempt(self.max_retries + 1),
             wait=wait_exponential_jitter(initial=1, max=32, jitter=2),
             retry=retry_if_exception_type((RetryableHTTPError, requests.RequestException)),
             before_sleep=before_sleep_log(logger, logging.WARNING),
@@ -145,7 +145,7 @@ class FireworksClient:
         try:
             return _call()
         except RetryError as exc:
-            raise RuntimeError(f"Fireworks request failed after {self.max_retries} retries") from exc
+            raise RuntimeError(f"Fireworks request failed after {self.max_retries + 1} attempts") from exc
 
 
 def image_to_data_url(path: Path) -> str:

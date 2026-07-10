@@ -21,13 +21,13 @@ class Settings:
     proxy_token: str = ""
     # --- Generation parameters ---
     temperature: float = 0.2
-    creative_temperature: float = 0.75
+    creative_temperature: float = 0.45
     max_tokens: int = 1200
     caption_max_tokens: int = 700
     check_max_tokens: int = 180
     reasoning_effort: str = "none"
     max_retries: int = 1
-    request_timeout_seconds: float = 60.0
+    request_timeout_seconds: float = 28.0
 
 
 def load_settings() -> Settings:
@@ -56,11 +56,11 @@ def load_settings() -> Settings:
         proxy_url=os.getenv("MODEL_PROXY_URL", ""),
         proxy_token=os.getenv("MODEL_PROXY_TOKEN", ""),
         temperature=float(os.getenv("FIREWORKS_TEMPERATURE", "0.2")),
-        creative_temperature=float(os.getenv("FIREWORKS_CREATIVE_TEMPERATURE", "0.75")),
+        creative_temperature=float(os.getenv("FIREWORKS_CREATIVE_TEMPERATURE", "0.45")),
         max_tokens=int(os.getenv("FIREWORKS_MAX_TOKENS", "1200")),
         caption_max_tokens=int(os.getenv("FIREWORKS_CAPTION_MAX_TOKENS", "700")),
         check_max_tokens=int(os.getenv("FIREWORKS_CHECK_MAX_TOKENS", "180")),
         reasoning_effort=os.getenv("FIREWORKS_REASONING_EFFORT", "none"),
         max_retries=int(os.getenv("FIREWORKS_MAX_RETRIES", "1")),
-        request_timeout_seconds=float(os.getenv("FIREWORKS_REQUEST_TIMEOUT_SECONDS", "60")),
+        request_timeout_seconds=float(os.getenv("FIREWORKS_REQUEST_TIMEOUT_SECONDS", "28")),
     )

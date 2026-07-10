@@ -6,6 +6,7 @@ import shutil
 import sys
 import tempfile
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -89,10 +90,13 @@ def download_video(video_url: str, destination_dir: Path, task_id: str, timeout:
 
 
 def fallback_captions(styles: list[str]) -> dict[str, str]:
-    return {
-        style: "The video shows a scene with visible subjects and activity."
-        for style in styles
+    fallbacks = {
+        "formal": "The video presents visible subjects and activity within the scene.",
+        "sarcastic": "Visible subjects carry on with the activity, because apparently the scene insists on staying busy.",
+        "humorous_tech": "The visible scene keeps its activity running like a process with no scheduled downtime.",
+        "humorous_non_tech": "The visible subjects keep things moving, as if standing still simply was not on today's agenda.",
     }
+    return {style: fallbacks.get(style, fallbacks["formal"]) for style in styles}
 
 
 def task_styles(task: dict[str, Any]) -> list[str]:
@@ -143,7 +147,7 @@ def run_harness(input_path: Path, output_path: Path) -> int:
     auto_transcribe = transcribe_mode(os.getenv("AUTO_TRANSCRIBE"))
     force_transcribe = truthy(os.getenv("FORCE_TRANSCRIBE"))
     run_checks = truthy(os.getenv("RUN_CHECKS"))
-    audio_cues_enabled = truthy(os.getenv("TRACK2_AUDIO_CUES", "true"))
+    audio_cues_enabled = truthy(os.getenv("TRACK2_AUDIO_CUES", "false"))
     audio_cue_seconds = float_env("TRACK2_AUDIO_CUE_SECONDS", 20.0)
     max_transcribed_clips = int_env("TRACK2_MAX_TRANSCRIBED_CLIPS", 3)
     transcribe_max_duration = float_env("TRACK2_TRANSCRIBE_MAX_DURATION_SECONDS", 90.0)
@@ -194,6 +198,27 @@ def run_harness(input_path: Path, output_path: Path) -> int:
             enable_style_retry=enable_style_retry,
         )
 
+        download_pool: ThreadPoolExecutor | None = None
+        download_futures: dict[int, Future[Path]] = {}
+        prefetch_depth = min(3, len(tasks))
+
+        def submit_download(task_index: int) -> None:
+            if download_pool is None or task_index >= len(tasks) or task_index in download_futures:
+                return
+            task = tasks[task_index]
+            download_futures[task_index] = download_pool.submit(
+                download_video,
+                str(task.get("video_url", "")),
+                video_dir,
+                str(task.get("task_id", "")),
+                45.0,
+            )
+
+        if not dry_run:
+            download_pool = ThreadPoolExecutor(max_workers=prefetch_depth, thread_name_prefix="video-download")
+            for prefetch_index in range(prefetch_depth):
+                submit_download(prefetch_index)
+
         for task_index, task in enumerate(tasks):
             task_started_at = time.monotonic()
             task_id = str(task.get("task_id", ""))
@@ -226,12 +251,12 @@ def run_harness(input_path: Path, output_path: Path) -> int:
                 else:
                     remaining_for_download = max(5.0, hard_deadline_seconds - elapsed)
                     download_started_at = time.monotonic()
-                    video_path = download_video(
-                        video_url,
-                        video_dir,
-                        task_id,
-                        timeout=min(120.0, remaining_for_download),
-                    )
+                    download_future = download_futures.pop(task_index, None)
+                    if download_future is None:
+                        submit_download(task_index)
+                        download_future = download_futures.pop(task_index)
+                    submit_download(task_index + prefetch_depth)
+                    video_path = download_future.result(timeout=min(45.0, remaining_for_download))
                     download_seconds = time.monotonic() - download_started_at
                 asset = VideoAsset(video_id=task_id, path=video_path, transcript_path=None)
 
@@ -346,6 +371,9 @@ def run_harness(input_path: Path, output_path: Path) -> int:
                 print(f"Task {task_id or '[missing task_id]'} failed: {exc}", file=sys.stderr)
                 output_results[task_index] = {"task_id": task_id, "captions": fallback_captions(styles)}
                 write_results(output_path, output_results)
+
+        if download_pool is not None:
+            download_pool.shutdown(wait=False, cancel_futures=True)
 
     write_results(output_path, output_results)
     return 0
