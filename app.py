@@ -149,9 +149,12 @@ def render_result(item: dict[str, Any]) -> None:
             if source and source.is_file():
                 st.video(str(source))
             render_storyboard(item.get("frames", []))
-            with st.expander("Observations", expanded=False):
+            with st.expander("Evidence Ledger", expanded=False):
                 frame_meta = {
                     "frame_count": item.get("frame_count", 0),
+                    "ocr_frame_count": item.get("ocr_frame_count", 0),
+                    "crop_frame_count": item.get("crop_frame_count", 0),
+                    "motion_frame_count": item.get("motion_frame_count", 0),
                     "sampling_strategy": item.get("sampling_strategy", "unknown"),
                 }
                 st.caption(json.dumps(frame_meta))
@@ -166,9 +169,15 @@ def render_result(item: dict[str, Any]) -> None:
                     st.write(captions.get(key, ""))
                     check = checks.get(key, {})
                     if check:
-                        status_cols = st.columns(2)
+                        status_cols = st.columns(4)
                         status_cols[0].metric("Accuracy", check.get("accuracy", "n/a"))
                         status_cols[1].metric("Tone", check.get("tone", "n/a"))
+                        acc_score = check.get("factual_accuracy")
+                        if acc_score is not None:
+                            status_cols[2].metric("Fact Score", f"{acc_score:.2f}")
+                        style_score = check.get("style_strength")
+                        if style_score is not None:
+                            status_cols[3].metric("Style Score", f"{style_score:.2f}")
                         if check.get("notes"):
                             st.caption(check["notes"])
 

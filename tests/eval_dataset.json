@@ -1,0 +1,122 @@
+[
+  {
+    "video_id": "eval_nature_01",
+    "video_url": "https://storage.googleapis.com/amd-hackathon-clips/eval_nature_01.mp4",
+    "category": "nature",
+    "ground_truth": {
+      "subjects": ["river", "trees"],
+      "subject_counts": {"river": 1, "trees": "multiple"},
+      "setting": "forest with flowing river",
+      "actions": ["water flowing", "leaves rustling"],
+      "important_objects": ["rocks", "moss"],
+      "ocr": [],
+      "timestamps": {"water_visible": "00:00-01:00"}
+    },
+    "expected_styles": ["formal", "sarcastic", "humorous_tech", "humorous_non_tech"]
+  },
+  {
+    "video_id": "eval_urban_01",
+    "video_url": "https://storage.googleapis.com/amd-hackathon-clips/eval_urban_01.mp4",
+    "category": "urban",
+    "ground_truth": {
+      "subjects": ["pedestrians", "vehicles"],
+      "subject_counts": {"pedestrians": "multiple", "vehicles": "multiple"},
+      "setting": "busy city intersection with traffic lights",
+      "actions": ["pedestrians crossing street", "vehicles stopping at light"],
+      "important_objects": ["traffic lights", "crosswalk", "buildings"],
+      "ocr": ["WALK"],
+      "timestamps": {"crossing_visible": "00:05-00:25", "vehicles_stopping": "00:00-00:10"}
+    },
+    "expected_styles": ["formal", "sarcastic", "humorous_tech", "humorous_non_tech"]
+  },
+  {
+    "video_id": "eval_animals_01",
+    "video_url": "https://storage.googleapis.com/amd-hackathon-clips/eval_animals_01.mp4",
+    "category": "animals",
+    "ground_truth": {
+      "subjects": ["cat"],
+      "subject_counts": {"cat": 1},
+      "setting": "living room with sofa and window",
+      "actions": ["cat stretching", "cat jumping onto sofa"],
+      "important_objects": ["sofa", "window", "sunlight patch"],
+      "ocr": [],
+      "timestamps": {"stretching": "00:00-00:08", "jumping": "00:08-00:12"}
+    },
+    "expected_styles": ["formal", "sarcastic", "humorous_tech", "humorous_non_tech"]
+  },
+  {
+    "video_id": "eval_people_01",
+    "video_url": "https://storage.googleapis.com/amd-hackathon-clips/eval_people_01.mp4",
+    "category": "people",
+    "ground_truth": {
+      "subjects": ["person"],
+      "subject_counts": {"person": 1},
+      "setting": "kitchen with countertop and stove",
+      "actions": ["person chopping vegetables", "person stirring pot"],
+      "important_objects": ["cutting board", "knife", "pot", "vegetables"],
+      "ocr": [],
+      "timestamps": {"chopping": "00:00-00:20", "stirring": "00:20-00:35"}
+    },
+    "expected_styles": ["formal", "sarcastic", "humorous_tech", "humorous_non_tech"]
+  },
+  {
+    "video_id": "eval_sports_01",
+    "video_url": "https://storage.googleapis.com/amd-hackathon-clips/eval_sports_01.mp4",
+    "category": "sports",
+    "ground_truth": {
+      "subjects": ["player"],
+      "subject_counts": {"player": 1},
+      "setting": "outdoor basketball court",
+      "actions": ["player dribbling ball", "player shooting at hoop"],
+      "important_objects": ["basketball", "hoop", "backboard", "court lines"],
+      "ocr": [],
+      "timestamps": {"dribbling": "00:00-00:10", "shooting": "00:10-00:15"}
+    },
+    "expected_styles": ["formal", "sarcastic", "humorous_tech", "humorous_non_tech"]
+  },
+  {
+    "video_id": "eval_food_01",
+    "video_url": "https://storage.googleapis.com/amd-hackathon-clips/eval_food_01.mp4",
+    "category": "food",
+    "ground_truth": {
+      "subjects": ["hands"],
+      "subject_counts": {"hands": 2},
+      "setting": "table with plates and utensils",
+      "actions": ["hands plating food", "sauce being drizzled"],
+      "important_objects": ["plate", "sauce bottle", "garnish", "napkin"],
+      "ocr": [],
+      "timestamps": {"plating": "00:00-00:15", "drizzling": "00:15-00:20"}
+    },
+    "expected_styles": ["formal", "sarcastic", "humorous_tech", "humorous_non_tech"]
+  },
+  {
+    "video_id": "eval_weather_01",
+    "video_url": "https://storage.googleapis.com/amd-hackathon-clips/eval_weather_01.mp4",
+    "category": "weather",
+    "ground_truth": {
+      "subjects": ["storm clouds", "rain"],
+      "subject_counts": {"storm_clouds": "multiple", "rain": 1},
+      "setting": "open field under dark sky",
+      "actions": ["clouds moving", "rain falling", "lightning flash"],
+      "important_objects": ["fence", "grass", "puddles"],
+      "ocr": [],
+      "timestamps": {"clouds_visible": "00:00-00:30", "lightning": "00:18-00:19", "rain_falling": "00:05-00:30"}
+    },
+    "expected_styles": ["formal", "sarcastic", "humorous_tech", "humorous_non_tech"]
+  },
+  {
+    "video_id": "eval_technology_01",
+    "video_url": "https://storage.googleapis.com/amd-hackathon-clips/eval_technology_01.mp4",
+    "category": "technology",
+    "ground_truth": {
+      "subjects": ["person", "robot arm"],
+      "subject_counts": {"person": 1, "robot_arm": 1},
+      "setting": "laboratory or workshop with equipment",
+      "actions": ["person adjusting controls", "robot arm moving component"],
+      "important_objects": ["control panel", "monitor", "mechanical component", "safety glasses"],
+      "ocr": ["CAUTION"],
+      "timestamps": {"adjusting_controls": "00:00-00:12", "robot_moving": "00:08-00:25"}
+    },
+    "expected_styles": ["formal", "sarcastic", "humorous_tech", "humorous_non_tech"]
+  }
+]

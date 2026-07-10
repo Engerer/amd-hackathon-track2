@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from PIL import Image, ImageDraw
 
-from track2_captioner.caption_pipeline import CaptionPipeline
+from track2_captioner.caption_pipeline import CaptionPipeline, EMPTY_EVIDENCE
 from track2_captioner.config import Settings
 from track2_captioner.harness import DEFAULT_STYLES, fallback_captions, task_styles
 from track2_captioner.video_ingest import (
@@ -52,99 +52,136 @@ class AccuracyPipelineTests(unittest.TestCase):
         self.assertLessEqual(selected[0].timestamp, 4.0)
         self.assertGreaterEqual(selected[-1].timestamp, 112.0)
 
-    def test_model_pack_contains_five_timestamped_frames(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir_name:
-            temp_dir = Path(temp_dir_name)
-            frames: list[Path] = []
-            for index in range(5):
-                timestamp = 0.5 + (index * 29.75)
-                frame_path = temp_dir / f"frame_{index:03d}_t{timestamp:09.3f}.jpg"
-                image = Image.new("RGB", (896, 504), (40 + index * 8, 80, 120))
-                draw = ImageDraw.Draw(image)
-                draw.rectangle((50 + index, 50, 300, 300), outline="white", width=4)
-                image.save(frame_path, quality=90)
-                frames.append(frame_path)
+    def test_evidence_ledger_structure(self) -> None:
+        """Test that evidence ledger has the required typed fields."""
+        required_fields = [
+            "summary", "setting", "subjects", "objects", "actions",
+            "claims", "uncertainties",
+        ]
+        for field in required_fields:
+            self.assertIn(field, EMPTY_EVIDENCE)
+        # Claims should be a list
+        self.assertIsInstance(EMPTY_EVIDENCE["claims"], list)
+        # Contradictions field should exist
+        self.assertIn("contradictions", EMPTY_EVIDENCE)
 
-            pipeline = object.__new__(CaptionPipeline)
-            model_images = pipeline._prepare_model_images(frames, temp_dir, 120.0)
+    def test_evidence_fusion_deduplicates_subjects(self) -> None:
+        """Test that _fuse_evidence deduplicates subjects across experts."""
+        pipeline = object.__new__(CaptionPipeline)
+        expert_results = {
+            "keyframes": {
+                "summary": "A dog runs in a park.",
+                "setting": "urban park",
+                "subjects": ["dog", "person"],
+                "objects": ["bench", "trees"],
+                "actions": ["running"],
+                "ocr": [],
+                "camera_motion": "static",
+                "claims": [
+                    {"type": "subject", "text": "a dog is visible", "confidence": 0.9}
+                ],
+                "uncertainties": [],
+                "contradictions": [],
+            },
+            "ocr": {
+                "summary": "A dog plays in a park.",
+                "setting": "city park",
+                "subjects": ["dog"],  # duplicate
+                "objects": ["bench", "fountain"],
+                "actions": ["playing"],
+                "ocr": ["NO DOGS ALLOWED"],
+                "camera_motion": "unknown",
+                "claims": [
+                    {"type": "ocr", "text": "sign reads NO DOGS ALLOWED", "confidence": 0.85}
+                ],
+                "uncertainties": ["exact park location unknown"],
+                "contradictions": [],
+            },
+        }
+        fused = pipeline._fuse_evidence(expert_results)
 
-            self.assertEqual(len(model_images), 5)
-            self.assertTrue(all("_t" in image.name for image in model_images))
-            with Image.open(model_images[0]) as prepared:
-                self.assertEqual(prepared.size, (896, 504))
-                self.assertTrue(all(channel < 45 for channel in prepared.getpixel((2, 2))))
+        # Dog should appear only once
+        dog_count = sum(1 for s in fused["subjects"] if s.lower() == "dog")
+        self.assertEqual(dog_count, 1)
 
-            content = pipeline._direct_caption_content(
-                VideoAsset("sample", Path("video.mp4")),
-                model_images,
-                5,
-                120.0,
-            )
-            request = json.loads(content[0]["text"])
-            self.assertEqual(request["video_duration_seconds"], 120.0)
-            self.assertEqual(len(request["frame_timestamps_seconds"]), 5)
-            self.assertEqual(request["frame_timestamps_seconds"][0], 0.5)
-            self.assertIn("factual ground-truth observations", request["task"])
-            self.assertNotIn("requested_styles", request)
-            self.assertNotIn("optional_transcript", request)
-            self.assertNotIn("optional_audio_context", request)
-            self.assertEqual(sum(item["type"] == "image_url" for item in content), 5)
-            self.assertEqual(sum(item["type"] == "text" for item in content), 6)
-            self.assertIn("Frame 1/5 at 00:00.5 of total 02:00.0", content[1]["text"])
-            self.assertEqual(content[2]["type"], "image_url")
+        # Both experts' objects should be merged
+        self.assertIn("bench", [o.lower() for o in fused["objects"]])
+        self.assertIn("fountain", [o.lower() for o in fused["objects"]])
 
-            style_request = pipeline._style_caption_request(
-                {
-                    "summary": "A cyclist rides along a path.",
-                    "setting": "tree-lined path",
-                    "subjects": ["cyclist"],
-                    "actions": ["rides along the path"],
-                },
-                DEFAULT_STYLES,
-            )
-            self.assertEqual(style_request["generation_order"], DEFAULT_STYLES)
-            self.assertEqual(set(style_request["style_instructions"]), set(DEFAULT_STYLES))
-            self.assertTrue(
-                all("Few-shot style reference" in prompt for prompt in style_request["style_instructions"].values())
-            )
-            self.assertTrue(
-                any("Do not reuse the sentence structures or opening phrases" in rule for rule in style_request["rules"])
-            )
+        # OCR should be captured
+        self.assertTrue(any("NO DOGS ALLOWED" in t for t in fused["ocr"]))
 
-    def test_caption_pipeline_uses_one_visual_call_then_one_text_only_call(self) -> None:
+        # Claims from both sources should be present
+        self.assertGreaterEqual(len(fused["claims"]), 2)
+
+    def test_parallel_candidate_generation_dry_run(self) -> None:
+        """Test that dry run produces captions for all styles."""
+        settings = Settings(
+            api_key="", model="m", caption_model="m", judge_model="m",
+        )
+        pipeline = CaptionPipeline(
+            settings=settings,
+            work_dir=Path("/tmp/test"),
+            dry_run=True,
+        )
+        captions = pipeline._generate_and_select_captions(
+            dict(EMPTY_EVIDENCE), DEFAULT_STYLES, enable_retry=False,
+        )
+        self.assertEqual(set(captions.keys()), set(DEFAULT_STYLES))
+        for style in DEFAULT_STYLES:
+            self.assertTrue(len(captions[style]) > 0)
+
+    def test_candidate_temperature_varies_by_style(self) -> None:
+        """Test that formal uses lower temp than humor styles."""
+        pipeline = object.__new__(CaptionPipeline)
+        pipeline.settings = Settings(
+            api_key="", model="m", caption_model="m", judge_model="m",
+            temperature=0.2, creative_temperature=0.45,
+        )
+        formal_temp = pipeline._candidate_temperature("formal", 0, 4)
+        humor_temp = pipeline._candidate_temperature("sarcastic", 0, 4)
+        self.assertLess(formal_temp, humor_temp)
+
+    def test_caption_pipeline_parallel_experts(self) -> None:
+        """Test that the pipeline calls parallel perception experts."""
         class FakeClient:
             def __init__(self) -> None:
                 self.calls: list[dict] = []
 
             def chat(self, model, messages, **kwargs):
                 self.calls.append({"model": model, "messages": messages, "kwargs": kwargs})
-                if len(self.calls) == 1:
+                if any("evidence" in str(m).lower() or "perception" in str(m).lower()
+                       for m in messages if isinstance(m, dict)):
                     return json.dumps({
-                        "summary": "A cyclist rides along a paved path.",
-                        "setting": "tree-lined paved path",
-                        "subjects": ["cyclist"],
-                        "key_objects": ["bicycle", "trees"],
-                        "actions": ["rides along the path"],
-                        "timeline": ["beginning: cyclist enters", "end: cyclist continues"],
-                        "visible_text": [],
+                        "summary": "A person walks down a city street.",
+                        "setting": "urban street",
+                        "subjects": ["person"],
+                        "subject_counts": {"person": "1"},
+                        "objects": ["buildings", "traffic light"],
+                        "actions": ["walking"],
+                        "ocr": [],
+                        "camera_motion": "static",
+                        "claims": [
+                            {
+                                "type": "action",
+                                "text": "a person walks along the sidewalk",
+                                "confidence": 0.9,
+                                "timestamps": ["00:02"],
+                            }
+                        ],
                         "uncertainties": [],
+                        "contradictions": [],
                     })
-                return json.dumps({
-                    "captions": {
-                        "formal": "A cyclist rides steadily along a tree-lined paved path.",
-                        "sarcastic": "Along the tree-lined path goes a cyclist, because apparently coasting was too ordinary.",
-                        "humorous_tech": "With low latency, a cyclist processes the paved route like a well-tuned scheduler.",
-                        "humorous_non_tech": "Steady as a Monday coffee run, a cyclist rolls along the path.",
-                    }
-                })
+                # Caption generation or selection
+                return json.dumps({"caption": "A person walks steadily along a city street."})
 
         with tempfile.TemporaryDirectory() as temp_dir_name:
             temp_dir = Path(temp_dir_name)
-            model_images: list[Path] = []
+            frames: list[Path] = []
             for index in range(5):
                 frame_path = temp_dir / f"frame_{index:03d}_t{index * 10:09.3f}.jpg"
                 Image.new("RGB", (32, 18), (40 + index, 80, 120)).save(frame_path)
-                model_images.append(frame_path)
+                frames.append(frame_path)
 
             client = FakeClient()
             pipeline = object.__new__(CaptionPipeline)
@@ -156,31 +193,62 @@ class AccuracyPipelineTests(unittest.TestCase):
                 caption_model="style-model",
                 judge_model="judge-model",
             )
+            pipeline.enable_style_retry = False
 
-            captions, observations = pipeline._direct_captions(
+            evidence = pipeline._extract_evidence(
                 VideoAsset("sample", Path("video.mp4")),
-                model_images,
-                5,
-                120.0,
-                DEFAULT_STYLES,
-                False,
+                keyframes=frames,
+                ocr_frames=[],
+                crop_frames=[],
+                motion_frames=[],
+                video_duration=120.0,
             )
 
-            self.assertEqual(len(client.calls), 2)
-            self.assertEqual(client.calls[0]["model"], "vision-model")
-            self.assertEqual(client.calls[1]["model"], "style-model")
-            visual_content = client.calls[0]["messages"][1]["content"]
-            self.assertEqual(sum(item["type"] == "image_url" for item in visual_content), 5)
-            self.assertIsInstance(client.calls[1]["messages"][1]["content"], str)
-            self.assertNotIn("image_url", client.calls[1]["messages"][1]["content"])
-            self.assertEqual(set(captions), set(DEFAULT_STYLES))
-            self.assertEqual(observations["setting"], "tree-lined paved path")
+            self.assertIn("claims", evidence)
+            self.assertIn("subjects", evidence)
+            self.assertEqual(evidence["setting"], "urban street")
 
     def test_fallbacks_cover_every_style_with_distinct_tones(self) -> None:
         captions = fallback_captions(DEFAULT_STYLES)
         self.assertEqual(set(captions), set(DEFAULT_STYLES))
         self.assertEqual(len(set(captions.values())), len(DEFAULT_STYLES))
         self.assertEqual(task_styles({"styles": ["formal"]}), DEFAULT_STYLES)
+
+    def test_grounded_check_returns_continuous_scores(self) -> None:
+        """Test that the check function returns continuous scores, not just pass/fail."""
+        settings = Settings(
+            api_key="", model="m", caption_model="m", judge_model="m",
+        )
+        pipeline = CaptionPipeline(
+            settings=settings,
+            work_dir=Path("/tmp/test"),
+            dry_run=True,
+        )
+        result = pipeline._check(
+            "formal",
+            dict(EMPTY_EVIDENCE),
+            "A sample caption.",
+        )
+        # Should have continuous scores
+        self.assertIn("factual_accuracy", result)
+        self.assertIn("style_strength", result)
+        self.assertIn("overall_score", result)
+        # Should also have backward-compatible pass/fail
+        self.assertIn("accuracy", result)
+        self.assertIn("tone", result)
+
+    def test_caption_issues_detects_missing_and_weak(self) -> None:
+        """Test style issue detection."""
+        issues = CaptionPipeline._caption_issues(
+            ["formal", "sarcastic", "humorous_tech"],
+            {
+                "formal": "A person walks.",
+                "sarcastic": "A person walks.",  # No sarcasm markers
+                # humorous_tech missing
+            },
+        )
+        self.assertTrue(any("sarcastic" in i and "weak" in i for i in issues))
+        self.assertTrue(any("humorous_tech" in i and "missing" in i for i in issues))
 
 
 if __name__ == "__main__":

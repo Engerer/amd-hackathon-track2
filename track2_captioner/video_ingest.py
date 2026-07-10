@@ -1,11 +1,12 @@
 from __future__ import annotations
+# noinspection PyUnresolvedReferences  – field used by VideoAsset below
 
 import json
 import logging
 import math
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,7 @@ class VideoDurationError(ValueError):
 class VideoAsset:
     video_id: str
     path: Path
+    segments: list[Path] | None = field(default=None)
 
 
 @dataclass(frozen=True)
@@ -604,3 +606,161 @@ def extract_frames(
     raise RuntimeError(
         f"Could not extract the required {effective_max} frames from {video_path}"
     )
+
+
+def split_video_segments(video_path: Path, max_segment_seconds: float = 60.0) -> list[Path]:
+    """Split a video into segments of at most *max_segment_seconds* each.
+
+    If the video is already short enough, returns the original path unchanged.
+    """
+    duration = probe_duration_seconds(video_path)
+    if duration is None or duration <= max_segment_seconds:
+        return [video_path]
+
+    segment_count = math.ceil(duration / max_segment_seconds)
+    output_dir = video_path.parent / f"{video_path.stem}_segments"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    segments: list[Path] = []
+    for i in range(segment_count):
+        start = i * max_segment_seconds
+        output_path = output_dir / f"{video_path.stem}_seg{i:03d}{video_path.suffix}"
+        command = [
+            "ffmpeg",
+            "-y",
+            "-ss",
+            f"{start:.3f}",
+            "-t",
+            f"{max_segment_seconds:.3f}",
+            "-i",
+            str(video_path),
+            "-c",
+            "copy",
+            str(output_path),
+        ]
+        if _run_ffmpeg(command) and output_path.exists():
+            segments.append(output_path)
+    return segments
+
+
+def extract_crop_frames(frames: list[Path], output_dir: Path) -> list[Path]:
+    """Create centre-cropped versions (50 % width × 50 % height) of each frame."""
+    from PIL import Image
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    crops: list[Path] = []
+    for frame_path in frames:
+        with Image.open(frame_path) as img:
+            w, h = img.size
+            crop_w, crop_h = w // 2, h // 2
+            left = (w - crop_w) // 2
+            top = (h - crop_h) // 2
+            cropped = img.crop((left, top, left + crop_w, top + crop_h))
+            out_path = output_dir / f"crop_{frame_path.name}"
+            cropped.save(out_path)
+            crops.append(out_path)
+    return crops
+
+
+def extract_ocr_frames(
+    video_path: Path,
+    frame_dir: Path,
+    max_frames: int = 3,
+    width: int = 1280,
+) -> list[Path]:
+    """Extract a small number of high-resolution frames for OCR at 1/3, 1/2 and 2/3 of the video."""
+    frame_dir.mkdir(parents=True, exist_ok=True)
+    duration = probe_duration_seconds(video_path)
+    if duration is None or duration <= 0:
+        return []
+
+    positions = [1 / 3, 1 / 2, 2 / 3]
+    timestamps = [duration * p for p in positions[:max_frames]]
+
+    frames: list[Path] = []
+    for i, ts in enumerate(timestamps):
+        output_path = frame_dir / f"ocr_frame_{i:03d}.jpg"
+        command = [
+            "ffmpeg",
+            "-y",
+            "-ss",
+            f"{ts:.3f}",
+            "-i",
+            str(video_path),
+            "-frames:v",
+            "1",
+            "-vf",
+            f"scale={width}:-1",
+            "-q:v",
+            "3",
+            str(output_path),
+        ]
+        if _run_ffmpeg(command) and output_path.exists():
+            frames.append(output_path)
+    return frames
+
+
+def extract_motion_clip_frames(
+    video_path: Path,
+    frame_dir: Path,
+    max_clips: int = 2,
+    fps: float = 3.0,
+) -> list[Path]:
+    """Extract bursts of frames around detected scene changes.
+
+    Uses ffmpeg scene-change detection (``select='gt(scene,0.15)'``) to
+    locate transitions, then captures 3 frames at *fps* rate starting
+    0.5 s before each transition.
+    """
+    frame_dir.mkdir(parents=True, exist_ok=True)
+
+    # Detect scene-change timestamps
+    detect_cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "frame=pts_time",
+        "-of",
+        "json",
+        "-f",
+        "lavfi",
+        f"movie='{str(video_path)}',select='gt(scene\\,0.15)'",
+    ]
+    try:
+        result = subprocess.run(detect_cmd, check=True, capture_output=True, text=True)
+        probe_data = json.loads(result.stdout)
+    except (FileNotFoundError, subprocess.CalledProcessError, json.JSONDecodeError):
+        return []
+
+    scene_timestamps: list[float] = []
+    for frame_info in probe_data.get("frames", []):
+        pts = frame_info.get("pts_time")
+        if pts is not None:
+            scene_timestamps.append(float(pts))
+    scene_timestamps = scene_timestamps[:max_clips]
+    if not scene_timestamps:
+        return []
+
+    all_frames: list[Path] = []
+    for clip_idx, scene_ts in enumerate(scene_timestamps):
+        burst_start = max(0.0, scene_ts - 0.5)
+        for frame_idx in range(3):
+            ts = burst_start + frame_idx / fps
+            output_path = frame_dir / f"motion_{clip_idx:03d}_{frame_idx:03d}.jpg"
+            command = [
+                "ffmpeg",
+                "-y",
+                "-ss",
+                f"{ts:.3f}",
+                "-i",
+                str(video_path),
+                "-frames:v",
+                "1",
+                "-q:v",
+                "3",
+                str(output_path),
+            ]
+            if _run_ffmpeg(command) and output_path.exists():
+                all_frames.append(output_path)
+    return all_frames

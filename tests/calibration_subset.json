@@ -1,0 +1,42 @@
+[
+  {
+    "video_id": "eval_nature_01",
+    "style": "formal",
+    "caption": "A river flows through a forested area with moss-covered rocks.",
+    "human_ratings": {
+      "factual_accuracy": 0.95,
+      "style_match": 0.90,
+      "naturalness": 0.85
+    }
+  },
+  {
+    "video_id": "eval_animals_01",
+    "style": "sarcastic",
+    "caption": "A cat stretches out in the living room and leaps onto the sofa, because apparently the floor was beneath its standards.",
+    "human_ratings": {
+      "factual_accuracy": 0.90,
+      "style_match": 0.88,
+      "naturalness": 0.82
+    }
+  },
+  {
+    "video_id": "eval_sports_01",
+    "style": "humorous_tech",
+    "caption": "A player dribbles across the court and deploys a shot at the hoop with surprisingly low latency.",
+    "human_ratings": {
+      "factual_accuracy": 0.92,
+      "style_match": 0.85,
+      "naturalness": 0.80
+    }
+  },
+  {
+    "video_id": "eval_weather_01",
+    "style": "humorous_non_tech",
+    "caption": "Storm clouds roll across an open field while rain pours down, turning the grass into nature's least appealing swimming pool.",
+    "human_ratings": {
+      "factual_accuracy": 0.88,
+      "style_match": 0.87,
+      "naturalness": 0.83
+    }
+  }
+]

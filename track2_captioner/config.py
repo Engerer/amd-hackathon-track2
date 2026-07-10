@@ -28,6 +28,21 @@ class Settings:
     reasoning_effort: str = "none"
     max_retries: int = 1
     request_timeout_seconds: float = 28.0
+    # --- Parallel candidate generation ---
+    candidate_count: int = 4
+    selector_model: str = ""
+    # --- Stage deadlines (seconds) ---
+    stage_deadline_perception: float = 12.0
+    stage_deadline_candidates: float = 10.0
+    stage_deadline_selection: float = 6.0
+    # --- Evidence extraction ---
+    ocr_enabled: bool = True
+    crop_enabled: bool = True
+    motion_clip_enabled: bool = True
+
+
+def _truthy(val: str) -> bool:
+    return val.strip().lower() in {'1', 'true', 'yes', 'y', 'on'}
 
 
 def load_settings() -> Settings:
@@ -63,4 +78,12 @@ def load_settings() -> Settings:
         reasoning_effort=os.getenv("FIREWORKS_REASONING_EFFORT", "none"),
         max_retries=int(os.getenv("FIREWORKS_MAX_RETRIES", "1")),
         request_timeout_seconds=float(os.getenv("FIREWORKS_REQUEST_TIMEOUT_SECONDS", "28")),
+        candidate_count=int(os.getenv("TRACK2_CANDIDATE_COUNT", "4")),
+        selector_model=os.getenv("FIREWORKS_SELECTOR_MODEL", "").strip() or caption_model,
+        stage_deadline_perception=float(os.getenv("TRACK2_STAGE_DEADLINE_PERCEPTION", "12.0")),
+        stage_deadline_candidates=float(os.getenv("TRACK2_STAGE_DEADLINE_CANDIDATES", "10.0")),
+        stage_deadline_selection=float(os.getenv("TRACK2_STAGE_DEADLINE_SELECTION", "6.0")),
+        ocr_enabled=_truthy(os.getenv("TRACK2_OCR_ENABLED", "true")),
+        crop_enabled=_truthy(os.getenv("TRACK2_CROP_ENABLED", "true")),
+        motion_clip_enabled=_truthy(os.getenv("TRACK2_MOTION_CLIP_ENABLED", "true")),
     )

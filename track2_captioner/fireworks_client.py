@@ -49,6 +49,7 @@ class FireworksClient:
         temperature: float = 0.2,
         reasoning_effort: str = "none",
         json_mode: bool = False,
+        json_schema: dict | None = None,
     ) -> str:
         import requests
 
@@ -59,7 +60,12 @@ class FireworksClient:
             "max_tokens": max_tokens,
             "reasoning_effort": reasoning_effort,
         }
-        if json_mode:
+        if json_schema is not None:
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {"name": "response", "schema": json_schema},
+            }
+        elif json_mode:
             payload["response_format"] = {"type": "json_object"}
 
         if self.proxy_url:
