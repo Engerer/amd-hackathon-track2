@@ -23,21 +23,22 @@ https://github.com/Engerer/amd-hackathon-track2
 
 ## How It Works
 
-The pipeline samples timeline evidence instead of processing every video frame. For every 30-120 second clip, it selects exactly five detailed frames with broad beginning-to-end coverage and sharp salient evidence.
+The pipeline samples timeline evidence instead of processing every video frame. For every 30-120 second clip, it preserves beginning, middle, and end anchors, then adds up to two visually diverse salience frames.
 
 ```text
 video URL
  -> download video
  -> ffprobe checks duration
- -> OpenCV preserves timeline anchors and scores extra candidates for sharpness, exposure, and motion
+ -> OpenCV preserves three timeline anchors and scores two extra candidates for sharpness, exposure, and motion
+ -> perceptual hashes prevent the two salience slots from duplicating existing views
  -> resize each frame to 896px width (896x504 for 16:9 video)
- -> overlay a visible frame number, timestamp, and total duration banner without changing resolution
- -> Qwen3.7 Plus receives all five timestamped frames and returns factual observations
- -> a text-only Qwen3.7 Plus call turns those observations into all four distinct styles
+ -> Kimi K2.6 receives five pristine frames and returns a schema-constrained evidence ledger
+ -> one text call generates candidates for every requested style
+ -> one multimodal Kimi K2.6 call sees the five frames again and selects the best caption per style
  -> Docker writes /output/results.json
 ```
 
-The first call returns factual evidence only. The second call receives that evidence plus the four prompt files and returns:
+The first call returns factual evidence only. The second call receives that evidence plus the requested style prompts and returns candidate lists. The third call selects final captions against the original five frames:
 
 ```json
 {
@@ -50,20 +51,20 @@ The first call returns factual evidence only. The second call receives that evid
 }
 ```
 
-The style call generates captions in a fixed order and must avoid opening phrases and sentence structures already used earlier in the same response. Optional style repair remains available for local experiments but is disabled in the timed submission.
+All three core model calls receive deadline-derived HTTP timeouts. Candidate count scales from one to three based on remaining time, and optional targeted style repair runs only while deadline budget remains.
 
 ## Defaults
 
-- Multimodal observation model: `accounts/fireworks/models/qwen3p7-plus`
-- Text-only style model: `accounts/fireworks/models/qwen3p7-plus`
+- Multimodal observation and selector model: `accounts/fireworks/models/kimi-k2p6`
+- Text candidate model: `accounts/fireworks/models/kimi-k2p6`
 - Frame sampling: five hybrid timeline and salience frames
 - Frame cap: exactly `5` total frames for 30-120 second clips
 - Frame width: `896px` (`896x504` for 16:9 video)
-- Model input: five separate timestamped frame images sent simultaneously
+- Model input: five pristine frame images with timestamps supplied as text metadata
 - Internal judge checks: off by default
 - Fireworks key: stored in a Cloudflare Worker secret, not in the repo
 
-Important: Qwen receives exactly five images per clip in the observation request. The extraction timestamp is encoded in each filename, drawn into the top image banner, and repeated in a text content part immediately before that image. The total duration is present in the banner, frame label, and observation metadata.
+Important: Kimi receives exactly five images in both the observation and selector requests. The images are not obscured by timestamp banners; timestamps and total duration are supplied as adjacent text metadata.
 
 ## Quick Start
 
@@ -153,7 +154,7 @@ Remove-Item Env:TRACK2_INPUT,Env:TRACK2_OUTPUT
 Build locally:
 
 ```powershell
-docker buildx build --platform linux/amd64 --provenance=false --sbom=false --load --build-arg MODEL_PROXY_URL=https://track2-fireworks-proxy.proxide-track2.workers.dev --build-arg FIREWORKS_MODEL=accounts/fireworks/models/qwen3p7-plus -t amd-track2-captioner:local .
+docker buildx build --platform linux/amd64 --provenance=false --sbom=false --load --build-arg MODEL_PROXY_URL=https://track2-fireworks-proxy.proxide-track2.workers.dev --build-arg FIREWORKS_MODEL=accounts/fireworks/models/kimi-k2p6 -t amd-track2-captioner:local .
 ```
 
 Publish the challenge image with the same single-platform settings:
@@ -235,12 +236,14 @@ TRACK2_HARD_DEADLINE_SECONDS=585
 TRACK2_FRAME_PROFILE=hybrid
 TRACK2_MAX_FRAMES=5
 TRACK2_MODEL_CALL_RESERVE_SECONDS=75
-TRACK2_ENABLE_STYLE_RETRY=false
+TRACK2_ENABLE_STYLE_RETRY=true
+TRACK2_PER_CLIP_DEADLINE_SECONDS=28
+TRACK2_CANDIDATE_COUNT=3
 TRACK2_DRY_RUN=true
 RUN_CHECKS=true
 MODEL_PROXY_URL=https://track2-fireworks-proxy.proxide-track2.workers.dev
-FIREWORKS_MODEL=accounts/fireworks/models/qwen3p7-plus
-FIREWORKS_CAPTION_MODEL=accounts/fireworks/models/qwen3p7-plus
+FIREWORKS_MODEL=accounts/fireworks/models/kimi-k2p6
+FIREWORKS_CAPTION_MODEL=accounts/fireworks/models/kimi-k2p6
 FIREWORKS_CAPTION_MAX_TOKENS=800
 FIREWORKS_CREATIVE_TEMPERATURE=0.45
 FIREWORKS_MAX_RETRIES=1
@@ -254,7 +257,9 @@ RUN_CHECKS=false
 TRACK2_FRAME_PROFILE=hybrid
 TRACK2_MAX_FRAMES=5
 TRACK2_MODEL_CALL_RESERVE_SECONDS=75
-TRACK2_ENABLE_STYLE_RETRY=false
+TRACK2_ENABLE_STYLE_RETRY=true
+TRACK2_PER_CLIP_DEADLINE_SECONDS=28
+TRACK2_CANDIDATE_COUNT=3
 FIREWORKS_CAPTION_MAX_TOKENS=800
 FIREWORKS_CREATIVE_TEMPERATURE=0.45
 FIREWORKS_MAX_RETRIES=1
@@ -263,7 +268,7 @@ FIREWORKS_REQUEST_TIMEOUT_SECONDS=28
 
 ## Prompt Tuning
 
-The production factual prompt and four few-shot style prompts live under `prompts/`. `track2_captioner/caption_pipeline.py` loads those files into the two-stage request and enforces the strict observation and caption schemas.
+The production factual prompt and four style prompts live under `prompts/`. `track2_captioner/caption_pipeline.py` loads them into the three-call pipeline and uses Fireworks-supported JSON schemas for evidence, candidate, selector, and check outputs.
 
 ## Security
 

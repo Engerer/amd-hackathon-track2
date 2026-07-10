@@ -94,6 +94,7 @@ def run_judge_panel(
     *,
     judge_fn: Any | None = None,
     num_judges: int = 3,
+    allow_stub: bool = False,
 ) -> dict[str, Any]:
     """Run a multi-model judge panel and average numeric scores.
 
@@ -107,8 +108,8 @@ def run_judge_panel(
         The target style (e.g. "formal").
     judge_fn : callable, optional
         A callable ``(evidence, caption, style) -> str`` that returns raw JSON
-        from the judge model. If *None*, a dry-run stub returning perfect
-        scores is used.
+        from the judge model. If *None*, a stub is available only when
+        ``allow_stub=True`` for an explicit dry run.
     num_judges : int
         How many independent judge calls to make and average.
 
@@ -118,7 +119,9 @@ def run_judge_panel(
         Averaged judge scores in the schema defined by ``judge.txt``.
     """
     if judge_fn is None:
-        # Dry-run stub: return near-perfect scores
+        if not allow_stub:
+            raise ValueError("A real judge_fn is required outside explicit dry-run mode.")
+        # Explicit dry-run stub: deterministic values for exercising aggregation.
         return {
             "factual_accuracy": 0.95,
             "subject_action_coverage": 0.90,
@@ -280,6 +283,7 @@ def _pearson_r(xs: list[float], ys: list[float]) -> float:
 def calibration_correlation(
     calibration_data: list[dict[str, Any]],
     judge_fn: Any | None = None,
+    allow_stub: bool = False,
 ) -> dict[str, float]:
     """Compute Pearson correlation between human ratings and judge scores.
 
@@ -299,7 +303,14 @@ def calibration_correlation(
 
         # Use a minimal evidence stub for calibration
         evidence = {"subjects": [], "actions": [], "setting": ""}
-        scores = run_judge_panel(evidence, caption, style, judge_fn=judge_fn, num_judges=1)
+        scores = run_judge_panel(
+            evidence,
+            caption,
+            style,
+            judge_fn=judge_fn,
+            num_judges=1,
+            allow_stub=allow_stub,
+        )
 
         if "factual_accuracy" in human:
             human_accuracy.append(human["factual_accuracy"])
@@ -345,6 +356,11 @@ def run_evaluation(
     eval_data = load_eval_dataset()
     calibration_data = load_calibration_subset()
 
+    if not dry_run and caption_fn is None:
+        raise ValueError("Live evaluation requires a caption_fn wired to the real pipeline.")
+    if not dry_run and judge_fn is None:
+        raise ValueError("Live evaluation requires a real judge_fn.")
+
     all_accuracy: list[float] = []
     all_style: list[float] = []
     all_unsupported_rate: list[float] = []
@@ -386,6 +402,7 @@ def run_evaluation(
             scores = run_judge_panel(
                 ground_truth, caption, target_style,
                 judge_fn=judge_fn, num_judges=3 if not dry_run else 1,
+                allow_stub=dry_run,
             )
 
             all_accuracy.append(caption_accuracy(scores))
@@ -420,7 +437,11 @@ def run_evaluation(
     }
 
     # Calibration correlation
-    cal_corr = calibration_correlation(calibration_data, judge_fn=judge_fn)
+    cal_corr = calibration_correlation(
+        calibration_data,
+        judge_fn=judge_fn,
+        allow_stub=dry_run,
+    )
 
     # Print report
     print(f"\n{'-'*60}")

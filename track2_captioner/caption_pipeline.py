@@ -4,7 +4,7 @@ import json
 import logging
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed, Future, TimeoutError
+from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -150,11 +150,16 @@ CAPTION_SCHEMA_STR = json.dumps(CANDIDATE_GENERATION_SCHEMA, indent=2)
 # Prompts
 # ---------------------------------------------------------------------------
 
-STYLE_CAPTION_SYSTEM = (
-    "You are a single-style caption candidate generator.\n"
+CANDIDATE_BATCH_SYSTEM = (
+    "You generate caption candidates for one or more requested video-caption styles.\n"
     "Treat the verified evidence ledger as the sole source of truth.\n"
-    "Return JSON with key 'candidates' containing a list of English sentences.\n"
+    "Return strict JSON containing candidates_by_style.\n"
     "Figurative language may change framing, but cannot introduce new subjects, actions, settings, objects, or intentions."
+)
+
+STYLE_CAPTION_SYSTEM = (
+    "You repair one video caption using only the verified evidence ledger. "
+    "Return strict JSON with key 'caption' containing one English sentence."
 )
 
 SELECTOR_ALL_STYLES_SYSTEM = (
@@ -218,12 +223,12 @@ DRY_RUN_CAPTIONS = {
 
 
 class CaptionPipeline:
-    """Streamlined 3-Call Video Captioning Pipeline targeting Kimi K2.6.
+    """Three-call video captioning pipeline targeting Kimi K2.6.
 
     Flow:
       1. Deliberate 5-frame selection with perceptual hash deduplication.
       2. Call 1 (Multimodal): Extract factual evidence ledger with frame references from 5 pristine frames.
-      3. Call 2 (Parallel): Generate 2-3 candidates per requested style in parallel.
+      3. Call 2 (Text): Generate 1-3 candidates for all requested styles in one call.
       4. Call 3 (Multimodal Selector): Single multimodal call evaluating candidates against the 5 pristine frames and selecting best captions.
     """
 
@@ -266,7 +271,7 @@ class CaptionPipeline:
         requested_styles = styles if styles else list(STYLE_PROMPTS)
 
         frame_dir = self.work_dir / asset.video_id
-        
+
         # Enforce absolute clip deadline
         if caption_fallback_deadline is None:
             caption_fallback_deadline = started_at + 28.0
@@ -316,7 +321,7 @@ class CaptionPipeline:
 
             timings["evidence_extraction_sec"] = time.monotonic() - caption_started_at
 
-            # Call 2 & 3: Parallel Candidate Generation & Multimodal Selection
+            # Calls 2 and 3: batched candidate generation and multimodal selection
             remaining_time = caption_fallback_deadline - time.monotonic()
             if remaining_time < 1.5:
                 captions = {
@@ -332,18 +337,27 @@ class CaptionPipeline:
                     do_retry,
                     caption_fallback_deadline,
                 )
-            
+
             timings["caption_generation_sec"] = time.monotonic() - (caption_started_at + timings.get("evidence_extraction_sec", 0.0))
 
         timings["total_caption_sec"] = time.monotonic() - caption_started_at
 
         # --- Stage 4: Continuous Quality checks ---
         checks = {}
-        if self.run_checks and not should_fallback:
+        if (
+            self.run_checks
+            and not should_fallback
+            and caption_fallback_deadline - time.monotonic() > 1.0
+        ):
             check_started_at = time.monotonic()
-            checks = self._run_checks_concurrent(requested_styles, evidence, captions)
+            checks = self._run_checks_concurrent(
+                requested_styles,
+                evidence,
+                captions,
+                deadline=caption_fallback_deadline,
+            )
             timings["quality_check_sec"] = time.monotonic() - check_started_at
-        
+
         timings["total_process_sec"] = time.monotonic() - started_at
 
         return {
@@ -377,15 +391,23 @@ class CaptionPipeline:
         """Extract a structured evidence ledger with frame references from 5 pristine frames."""
         assert self.client is not None
 
-        # Compile motion/native-video metadata locally
+        # Describe the actual attached frames without assigning semantic roles
+        # that may be invalid after the selected frames are sorted chronologically.
         motion_metadata = {
-            "allocation_strategy": "Deliberate 5-Frame Allocation (beginning, strongest_scene_change, middle, strongest_action, end)",
+            "allocation_strategy": (
+                "Three mandatory temporal anchors plus up to two visually diverse "
+                "salient frames, presented below in chronological order."
+            ),
             "timeline_events": [
-                {"frame_index": 1, "type": "Beginning Timeline Anchor", "description": "Establishes baseline setting and initial state."},
-                {"frame_index": 2, "type": "Strongest Scene Change Spike", "description": "Highest frame difference / transition index in video."},
-                {"frame_index": 3, "type": "Middle Timeline Anchor", "description": "Tracks progression / mid-point state of action."},
-                {"frame_index": 4, "type": "Strongest Action/Detail Peak", "description": "Highest motion delta / visual detail frame."},
-                {"frame_index": 5, "type": "End Timeline Anchor", "description": "Tracks final state and resolution of action."}
+                {
+                    "frame_index": index + 1,
+                    "timestamp_seconds": round(
+                        self._frame_timestamp(frame, index, len(keyframes), video_duration),
+                        3,
+                    ),
+                    "type": "chronological_selected_frame",
+                }
+                for index, frame in enumerate(keyframes)
             ]
         }
 
@@ -395,15 +417,11 @@ class CaptionPipeline:
             timestamp = self._frame_timestamp(frame, index, len(keyframes), video_duration)
             frame_timestamps.append(round(timestamp, 3))
 
-        # Direct video url grounding support
-        is_native_video = any(x in self.settings.model.lower() for x in ["omni", "video", "gemini"])
-
         request = {
             "task": "Extract a structured evidence ledger from these 5 frames. Group observations with explicit frame references (e.g. Frame 1, Frame 3).",
             "video_duration_seconds": round(video_duration, 3) if video_duration else None,
             "frame_timestamps_seconds": frame_timestamps,
             "motion_timeline_evidence": motion_metadata,
-            "native_video_grounding_url": str(asset.path) if is_native_video else None,
         }
         content.append({"type": "text", "text": json.dumps(request, indent=2)})
 
@@ -432,10 +450,16 @@ class CaptionPipeline:
             temperature=self.settings.temperature,
             reasoning_effort=self.settings.reasoning_effort,
             json_schema=EVIDENCE_LEDGER_SCHEMA,
+            timeout_seconds=timeout,
         )
-        
-        parsed = self._parse_or_repair_json(response, "evidence ledger", EVIDENCE_LEDGER_SCHEMA)
-        
+
+        parsed = self._parse_or_repair_json(
+            response,
+            "evidence ledger",
+            EVIDENCE_LEDGER_SCHEMA,
+            timeout_seconds=max(0.5, clip_deadline - time.monotonic() - 0.25),
+        )
+
         # Semantic consensus & threshold check: filter low-confidence claims
         if "claims" in parsed and isinstance(parsed["claims"], list):
             valid_claims = []
@@ -467,7 +491,7 @@ class CaptionPipeline:
         assert self.client is not None
 
         remaining_time = clip_deadline - time.monotonic()
-        
+
         # Adaptive candidate count scaling based on remaining time
         if remaining_time > 15.0:
             num_candidates = 3
@@ -475,36 +499,27 @@ class CaptionPipeline:
             num_candidates = 2
         else:
             num_candidates = 1  # Low latency mode: skip selector entirely
+        num_candidates = min(
+            num_candidates,
+            max(1, min(getattr(self.settings, "candidate_count", 3), 3)),
+        )
 
-        # Call 2: Generate candidates concurrently
-        style_candidates: dict[str, list[str]] = {style: [] for style in styles}
-        futures: dict[Future, str] = {}
-
-        max_workers = min(len(styles), 4)
-        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="candidates") as pool:
-            for style in styles:
-                future = pool.submit(
-                    self._generate_candidates_for_style,
-                    evidence, style, num_candidates,
-                )
-                futures[future] = style
-
-            try:
-                cand_timeout = min(remaining_time - 3.0, getattr(self.settings, "stage_deadline_candidates", 10.0))
-                cand_timeout = max(1.0, cand_timeout)
-                for future in as_completed(futures, timeout=cand_timeout):
-                    style = futures[future]
-                    try:
-                        candidates = future.result()
-                        if candidates:
-                            style_candidates[style] = candidates
-                    except Exception as e:
-                        logger.error(f"Candidate generation failed for {style}: {e}")
-            except TimeoutError:
-                # Cancel pending futures immediately on timeout
-                for f in futures:
-                    f.cancel()
-                logger.warning("Candidate generation timed out; cancelling pending tasks.")
+        # Call 2: Generate candidates for every requested style in one text call.
+        cand_timeout = min(
+            remaining_time - 3.0,
+            getattr(self.settings, "stage_deadline_candidates", 10.0),
+        )
+        cand_timeout = max(1.0, cand_timeout)
+        try:
+            style_candidates = self._generate_candidates_all_styles(
+                evidence,
+                styles,
+                num_candidates,
+                timeout_seconds=cand_timeout,
+            )
+        except Exception as exc:
+            logger.error("Call 2 (candidate generation) failed: %s", exc)
+            style_candidates = {style: [] for style in styles}
 
         # Enforce fallbacks for missing candidates
         for style in styles:
@@ -519,7 +534,10 @@ class CaptionPipeline:
         else:
             try:
                 captions = self._select_best_candidates_multimodal(
-                    evidence, keyframes, style_candidates, remaining_time,
+                    evidence,
+                    keyframes,
+                    style_candidates,
+                    remaining_time,
                 )
             except Exception as e:
                 logger.error(f"Call 3 (Multimodal Selector) failed: {e}")
@@ -533,60 +551,88 @@ class CaptionPipeline:
         if enable_retry and (clip_deadline - time.monotonic() > 2.0):
             issues = self._caption_issues(styles, captions)
             if issues:
-                captions = self._repair_captions(evidence, styles, captions, issues)
+                captions = self._repair_captions(
+                    evidence,
+                    styles,
+                    captions,
+                    issues,
+                    deadline=clip_deadline,
+                )
 
         return captions
 
-    def _generate_candidates_for_style(
+    def _generate_candidates_all_styles(
         self,
         evidence: dict[str, Any],
-        style: str,
+        styles: list[str],
         num_candidates: int,
-    ) -> list[str]:
-        """Call 2: Generate 2-3 candidates for one style in a single schema-constrained call."""
+        timeout_seconds: float,
+    ) -> dict[str, list[str]]:
+        """Call 2: generate candidates for all requested styles in one call."""
         assert self.client is not None
 
-        style_instruction = load_prompt(STYLE_PROMPTS[style]) if style in STYLE_PROMPTS else ""
-        
-        request = {
-            "target_style": style,
-            "evidence_ledger": evidence,
-            "style_instructions": style_instruction,
-            "rules": [
-                "Use ONLY facts from the evidence ledger. Do not add unsupported details.",
-                f"Generate exactly {num_candidates} distinct candidate captions in the target style.",
-                "Each caption must be one concise English sentence, ideally 12 to 30 words.",
-                "Figurative language may change framing but CANNOT introduce new subjects or actions.",
-                "Return JSON with key 'candidates' containing the list of captions.",
-            ]
+        style_instructions = {
+            style: load_prompt(STYLE_PROMPTS[style])
+            for style in styles
+            if style in STYLE_PROMPTS
         }
 
-        # Schema to return exactly num_candidates items
+        request = {
+            "requested_styles": styles,
+            "evidence_ledger": evidence,
+            "style_instructions": style_instructions,
+            "rules": [
+                "Use ONLY facts from the evidence ledger. Do not add unsupported details.",
+                f"Generate exactly {num_candidates} distinct candidate captions for each requested style.",
+                "Each caption must be one concise English sentence, ideally 12 to 30 words.",
+                "Figurative language may change framing but CANNOT introduce new subjects or actions.",
+                "Return JSON with key 'candidates_by_style'.",
+            ],
+        }
+
+        style_properties = {
+            style: {"type": "array", "items": {"type": "string"}}
+            for style in styles
+        }
         schema = {
             "type": "object",
             "properties": {
-                "candidates": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "minItems": num_candidates,
-                    "maxItems": num_candidates
-                }
+                "candidates_by_style": {
+                    "type": "object",
+                    "properties": style_properties,
+                    "required": styles,
+                    "additionalProperties": False,
+                },
             },
-            "required": ["candidates"]
+            "required": ["candidates_by_style"],
+            "additionalProperties": False,
         }
 
         response = self.client.chat(
             self.settings.caption_model,
             [
-                {"role": "system", "content": STYLE_CAPTION_SYSTEM},
+                {"role": "system", "content": CANDIDATE_BATCH_SYSTEM},
                 {"role": "user", "content": json.dumps(request, indent=2)},
             ],
             max_tokens=self.settings.caption_max_tokens,
-            temperature=self.settings.creative_temperature if style != "formal" else 0.1,
+            temperature=self.settings.creative_temperature,
             json_schema=schema,
+            timeout_seconds=timeout_seconds,
         )
         parsed = parse_json_object(response)
-        return parsed.get("candidates", [])
+        payload = parsed.get("candidates_by_style", {})
+        result: dict[str, list[str]] = {}
+        for style in styles:
+            raw_candidates = payload.get(style, []) if isinstance(payload, dict) else []
+            if not isinstance(raw_candidates, list):
+                raw_candidates = []
+            cleaned = [
+                self._clean_caption(str(candidate))
+                for candidate in raw_candidates
+                if self._clean_caption(str(candidate))
+            ]
+            result[style] = cleaned[:num_candidates]
+        return result
 
     # ======================================================================
     # Call 3: Grounded Multimodal Selector
@@ -633,23 +679,30 @@ class CaptionPipeline:
             max_tokens=self.settings.caption_max_tokens,
             temperature=0.1,
             json_schema=SELECTOR_ALL_STYLES_SCHEMA,
+            timeout_seconds=timeout,
         )
-        
+
         parsed = parse_json_object(response)
         selected = parsed.get("selected_captions", {})
-        
+
         # In case the selector fails to pick all requested styles
         for style in style_candidates:
             if style not in selected:
                 selected[style] = style_candidates[style][0]
-                
+
         return selected
 
     # ======================================================================
     # Quality checks & Repairs
     # ======================================================================
 
-    def _check(self, style: str, evidence: dict[str, Any], caption: str) -> dict[str, Any]:
+    def _check(
+        self,
+        style: str,
+        evidence: dict[str, Any],
+        caption: str,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
         """Run grounded quality check for a single caption."""
         if self.dry_run:
             return {
@@ -683,6 +736,7 @@ class CaptionPipeline:
                 temperature=self.settings.temperature,
                 reasoning_effort=self.settings.reasoning_effort,
                 json_schema=CHECK_SCHEMA,
+                timeout_seconds=timeout_seconds,
             )
             parsed = parse_json_object(response)
 
@@ -720,6 +774,7 @@ class CaptionPipeline:
         styles: list[str],
         evidence: dict[str, Any],
         captions: dict[str, str],
+        deadline: float | None = None,
     ) -> dict[str, dict[str, Any]]:
         if self.dry_run:
             return {
@@ -733,21 +788,31 @@ class CaptionPipeline:
 
         checks: dict[str, dict[str, Any]] = {}
         workers = min(len(captions), 4)
-        with ThreadPoolExecutor(max_workers=workers) as pool:
+        timeout = None if deadline is None else max(0.5, deadline - time.monotonic() - 0.25)
+        pool = ThreadPoolExecutor(max_workers=workers)
+        future_to_style: dict[Any, str] = {}
+        try:
             future_to_style = {
-                pool.submit(self._check, style, evidence, caption): style
+                pool.submit(self._check, style, evidence, caption, timeout): style
                 for style, caption in captions.items()
             }
-            for future in as_completed(future_to_style):
-                style = future_to_style[future]
-                try:
-                    checks[style] = future.result()
-                except Exception as exc:
-                    checks[style] = {
-                        "accuracy": "fail", "tone": "fail",
-                        "notes": f"Check error: {exc}",
-                        "factual_accuracy": 0.0, "style_strength": 0.0, "overall_score": 0.0,
-                    }
+            try:
+                for future in as_completed(future_to_style, timeout=timeout):
+                    style = future_to_style[future]
+                    try:
+                        checks[style] = future.result()
+                    except Exception as exc:
+                        checks[style] = {
+                            "accuracy": "fail", "tone": "fail",
+                            "notes": f"Check error: {exc}",
+                            "factual_accuracy": 0.0, "style_strength": 0.0, "overall_score": 0.0,
+                        }
+            except TimeoutError:
+                logger.warning("Quality checks exceeded their deadline.")
+        finally:
+            for future in future_to_style:
+                future.cancel()
+            pool.shutdown(wait=False, cancel_futures=True)
         return checks
 
     def _repair_captions(
@@ -756,17 +821,32 @@ class CaptionPipeline:
         styles: list[str],
         current_captions: dict[str, str],
         issues: list[str],
+        deadline: float,
     ) -> dict[str, str]:
         """Repair captions that fail rules or style checks."""
         repaired = dict(current_captions)
+        issues_by_style: dict[str, list[str]] = {}
         for issue in issues:
-            parts = issue.split(":", 1)
-            style = parts[0].strip()
-            instruction = parts[1].strip() if len(parts) > 1 else "make caption correct and style strong"
+            style, _, instruction = issue.partition(":")
+            style = style.strip()
             if style in current_captions:
-                result = self._repair_single_caption(evidence, style, current_captions[style], instruction)
-                if result:
-                    repaired[style] = result
+                issues_by_style.setdefault(style, []).append(
+                    instruction.strip() or "make caption correct and style strong"
+                )
+
+        for style, style_issues in issues_by_style.items():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.75:
+                break
+            result = self._repair_single_caption(
+                evidence,
+                style,
+                current_captions[style],
+                "; ".join(style_issues),
+                timeout_seconds=max(0.5, remaining - 0.25),
+            )
+            if result:
+                repaired[style] = result
         return self._sanitize_caption_map(styles, repaired, evidence)
 
     def _repair_single_caption(
@@ -775,6 +855,7 @@ class CaptionPipeline:
         style: str,
         caption: str,
         repair_instructions: str,
+        timeout_seconds: float | None = None,
     ) -> str:
         """Call style model to repair a single caption with rules enforcement."""
         assert self.client is not None
@@ -802,6 +883,7 @@ class CaptionPipeline:
                 max_tokens=self.settings.caption_max_tokens,
                 temperature=0.15,
                 json_schema={"type": "object", "properties": {"caption": {"type": "string"}}, "required": ["caption"]},
+                timeout_seconds=timeout_seconds,
             )
             parsed = parse_json_object(response)
             repaired = str(parsed.get("caption", "")).strip()
@@ -897,6 +979,8 @@ class CaptionPipeline:
 
     def _fallback_caption(self, style: str, evidence: dict[str, Any]) -> str:
         summary = str(evidence.get("summary") or evidence.get("setting") or "").strip()
+        if summary.lower().startswith("no visual evidence"):
+            summary = ""
         subjects = ", ".join(str(item) for item in evidence.get("subjects", [])[:2])
         actions = ", ".join(str(item) for item in evidence.get("actions", [])[:2])
         base = summary or f"The video shows {subjects or 'visible subjects'} with {actions or 'visible activity'}."
@@ -909,7 +993,11 @@ class CaptionPipeline:
         return f"{base} It is doing its best to make everyday motion look eventful."
 
     def _parse_or_repair_json(
-        self, response: str, label: str, expected_schema: str | None = None,
+        self,
+        response: str,
+        label: str,
+        expected_schema: dict[str, Any] | str | None = None,
+        timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
         try:
             return parse_json_object(response)
@@ -937,6 +1025,8 @@ class CaptionPipeline:
                 ],
                 max_tokens=self.settings.caption_max_tokens,
                 temperature=0.0,
-                json_mode=True,
+                json_mode=not isinstance(expected_schema, dict),
+                json_schema=expected_schema if isinstance(expected_schema, dict) else None,
+                timeout_seconds=timeout_seconds,
             )
             return parse_json_object(repaired)

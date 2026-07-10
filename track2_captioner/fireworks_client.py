@@ -50,8 +50,18 @@ class FireworksClient:
         reasoning_effort: str = "none",
         json_mode: bool = False,
         json_schema: dict | None = None,
+        timeout_seconds: float | None = None,
     ) -> str:
         import requests
+
+        request_timeout = (
+            self.request_timeout_seconds
+            if timeout_seconds is None
+            else max(0.5, min(self.request_timeout_seconds, timeout_seconds))
+        )
+        # Deadline-bound calls get one attempt. Retrying a full request after a
+        # timeout would exceed the competition's per-clip wall-clock budget.
+        max_attempts = 1 if timeout_seconds is not None else self.max_retries + 1
 
         payload: dict[str, Any] = {
             "model": model,
@@ -69,9 +79,9 @@ class FireworksClient:
             payload["response_format"] = {"type": "json_object"}
 
         if self.proxy_url:
-            return self._chat_proxy_with_retry(payload)
+            return self._chat_proxy_with_retry(payload, request_timeout, max_attempts)
 
-        return self._chat_direct_with_retry(requests, payload)
+        return self._chat_direct_with_retry(requests, payload, request_timeout, max_attempts)
 
     @staticmethod
     def _content_from_payload(payload: dict[str, Any]) -> str:
@@ -81,11 +91,16 @@ class FireworksClient:
 
     # ── Proxy path ──────────────────────────────────────────────────────
 
-    def _chat_proxy_with_retry(self, payload: dict[str, Any]) -> str:
+    def _chat_proxy_with_retry(
+        self,
+        payload: dict[str, Any],
+        request_timeout: float,
+        max_attempts: int,
+    ) -> str:
         from tenacity import RetryError, before_sleep_log, retry, retry_if_exception_type, stop_after_attempt, wait_exponential_jitter
 
         @retry(
-            stop=stop_after_attempt(self.max_retries + 1),
+            stop=stop_after_attempt(max_attempts),
             wait=wait_exponential_jitter(initial=1, max=32, jitter=2),
             retry=retry_if_exception_type((RetryableHTTPError, TimeoutError, urllib.error.URLError)),
             before_sleep=before_sleep_log(logger, logging.WARNING),
@@ -107,7 +122,7 @@ class FireworksClient:
                 method="POST",
             )
             try:
-                with urllib.request.urlopen(request, timeout=self.request_timeout_seconds) as response:
+                with urllib.request.urlopen(request, timeout=request_timeout) as response:
                     response_payload = json.loads(response.read().decode("utf-8"))
                 return self._content_from_payload(response_payload)
             except urllib.error.HTTPError as exc:
@@ -119,15 +134,21 @@ class FireworksClient:
         try:
             return _call()
         except RetryError as exc:
-            raise RuntimeError(f"Proxy request failed after {self.max_retries + 1} attempts") from exc
+            raise RuntimeError(f"Proxy request failed after {max_attempts} attempts") from exc
 
     # ── Direct Fireworks path ───────────────────────────────────────────
 
-    def _chat_direct_with_retry(self, requests: Any, payload: dict[str, Any]) -> str:
+    def _chat_direct_with_retry(
+        self,
+        requests: Any,
+        payload: dict[str, Any],
+        request_timeout: float,
+        max_attempts: int,
+    ) -> str:
         from tenacity import RetryError, before_sleep_log, retry, retry_if_exception_type, stop_after_attempt, wait_exponential_jitter
 
         @retry(
-            stop=stop_after_attempt(self.max_retries + 1),
+            stop=stop_after_attempt(max_attempts),
             wait=wait_exponential_jitter(initial=1, max=32, jitter=2),
             retry=retry_if_exception_type((RetryableHTTPError, requests.RequestException)),
             before_sleep=before_sleep_log(logger, logging.WARNING),
@@ -139,7 +160,7 @@ class FireworksClient:
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
             }
-            response = requests.post(url, headers=headers, json=payload, timeout=self.request_timeout_seconds)
+            response = requests.post(url, headers=headers, json=payload, timeout=request_timeout)
             if response.status_code in RETRY_STATUS_CODES:
                 raise RetryableHTTPError(
                     response.status_code,
@@ -151,7 +172,7 @@ class FireworksClient:
         try:
             return _call()
         except RetryError as exc:
-            raise RuntimeError(f"Fireworks request failed after {self.max_retries + 1} attempts") from exc
+            raise RuntimeError(f"Fireworks request failed after {max_attempts} attempts") from exc
 
 
 def image_to_data_url(path: Path) -> str:

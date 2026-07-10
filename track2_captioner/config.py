@@ -29,7 +29,7 @@ class Settings:
     max_retries: int = 1
     request_timeout_seconds: float = 28.0
     # --- Parallel candidate generation ---
-    candidate_count: int = 4
+    candidate_count: int = 3
     selector_model: str = ""
     # --- Stage deadlines (seconds) ---
     stage_deadline_perception: float = 12.0
@@ -78,7 +78,7 @@ def load_settings() -> Settings:
         reasoning_effort=os.getenv("FIREWORKS_REASONING_EFFORT", "none"),
         max_retries=int(os.getenv("FIREWORKS_MAX_RETRIES", "1")),
         request_timeout_seconds=float(os.getenv("FIREWORKS_REQUEST_TIMEOUT_SECONDS", "28")),
-        candidate_count=int(os.getenv("TRACK2_CANDIDATE_COUNT", "4")),
+        candidate_count=int(os.getenv("TRACK2_CANDIDATE_COUNT", "3")),
         selector_model=os.getenv("FIREWORKS_SELECTOR_MODEL", "").strip() or caption_model,
         stage_deadline_perception=float(os.getenv("TRACK2_STAGE_DEADLINE_PERCEPTION", "12.0")),
         stage_deadline_candidates=float(os.getenv("TRACK2_STAGE_DEADLINE_CANDIDATES", "10.0")),

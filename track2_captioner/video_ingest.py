@@ -68,8 +68,14 @@ def probe_duration_seconds(video_path: Path) -> float | None:
         str(video_path),
     ]
     try:
-        result = subprocess.run(command, check=True, capture_output=True, text=True)
-    except (FileNotFoundError, subprocess.CalledProcessError):
+        result = subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return None
 
     try:
@@ -121,9 +127,15 @@ def _reset_dir(path: Path) -> None:
 
 def _run_ffmpeg(command: list[str]) -> bool:
     try:
-        subprocess.run(command, check=True, capture_output=True, text=True)
+        subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10.0,
+        )
         return True
-    except (FileNotFoundError, subprocess.CalledProcessError):
+    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return False
 
 
@@ -368,12 +380,23 @@ def _select_adaptive_candidates(
     duration: float,
     final_count: int,
 ) -> list[FrameCandidate]:
-    """Select 5 frames with deliberate allocation (beginning, end, middle, scene change, detail) and enforce visual diversity via perceptual hash deduplication."""
+    """Select temporal anchors plus two visually diverse salient frames.
+
+    Beginning, middle, and end coverage is mandatory even when the frames look
+    similar. Perceptual deduplication is applied only to the two salience slots;
+    otherwise static-camera videos can lose their entire second half.
+    """
     final_count = min(final_count, 5)
     if not candidates:
         return []
 
     selected: list[FrameCandidate] = []
+
+    def add_anchor(target: float) -> None:
+        for candidate in sorted(candidates, key=lambda item: abs(item.timestamp - target)):
+            if candidate not in selected:
+                selected.append(candidate)
+                return
 
     def is_duplicate(cand: FrameCandidate) -> bool:
         for s in selected:
@@ -381,40 +404,30 @@ def _select_adaptive_candidates(
                 return True
         return False
 
-    # 1. Beginning candidate: closest to 0.05 * duration
-    beg_target = 0.05 * duration
-    for c in sorted(candidates, key=lambda c: abs(c.timestamp - beg_target)):
-        if not is_duplicate(c):
-            selected.append(c)
-            break
+    # Preserve broad temporal coverage unconditionally.
+    add_anchor(0.05 * duration)
+    if final_count >= 2:
+        add_anchor(0.50 * duration)
+    if final_count >= 3:
+        add_anchor(0.95 * duration)
 
-    # 2. End candidate: closest to 0.95 * duration
-    end_target = 0.95 * duration
-    for c in sorted(candidates, key=lambda c: abs(c.timestamp - end_target)):
-        if not is_duplicate(c):
-            selected.append(c)
-            break
-
-    # 3. Middle candidate: closest to 0.50 * duration
-    mid_target = 0.50 * duration
-    for c in sorted(candidates, key=lambda c: abs(c.timestamp - mid_target)):
-        if not is_duplicate(c):
-            selected.append(c)
-            break
-
-    # 4. Strongest scene change: highest motion
+    # Add the strongest motion/transition candidate that contributes a new view.
     for c in sorted(candidates, key=lambda c: c.motion, reverse=True):
+        if len(selected) >= final_count:
+            break
         if c not in selected and not is_duplicate(c):
             selected.append(c)
             break
 
-    # 5. Strongest action/detail: highest score
+    # Add the strongest sharp/action/detail candidate that contributes a new view.
     for c in sorted(candidates, key=lambda c: c.score, reverse=True):
+        if len(selected) >= final_count:
+            break
         if c not in selected and not is_duplicate(c):
             selected.append(c)
             break
 
-    # Fallback to timeline anchors if still lacking frames due to strict deduplication
+    # Fill any remaining slot without sacrificing the mandatory anchors.
     if len(selected) < final_count:
         for c in sorted(candidates, key=lambda c: c.score, reverse=True):
             if len(selected) >= final_count:

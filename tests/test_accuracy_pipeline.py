@@ -11,7 +11,13 @@ from PIL import Image
 
 from track2_captioner.caption_pipeline import CaptionPipeline, EMPTY_EVIDENCE
 from track2_captioner.config import Settings
-from track2_captioner.harness import DEFAULT_STYLES, fallback_captions, task_styles
+from tests.evaluation_suite import run_evaluation
+from track2_captioner.harness import (
+    DEFAULT_STYLES,
+    fallback_captions,
+    read_tasks,
+    task_styles,
+)
 from track2_captioner.video_ingest import (
     FrameCandidate,
     VideoAsset,
@@ -51,6 +57,24 @@ class AccuracyPipelineTests(unittest.TestCase):
         selected = _select_adaptive_candidates(candidates, duration=116.0, final_count=5)
         self.assertEqual(len(selected), 5)
         self.assertLessEqual(selected[0].timestamp, 10.0)
+        self.assertGreaterEqual(selected[-1].timestamp, 106.0)
+
+    def test_static_video_still_preserves_end_anchor(self) -> None:
+        candidates = [
+            FrameCandidate(
+                timestamp=float(index * 4),
+                score=1.0 - (index / 40),
+                sharpness=100.0,
+                brightness=120.0,
+                motion=float(30 - index),
+                hash_value=12345,
+            )
+            for index in range(30)
+        ]
+        selected = _select_adaptive_candidates(candidates, duration=116.0, final_count=5)
+        self.assertEqual(len(selected), 5)
+        self.assertLessEqual(selected[0].timestamp, 10.0)
+        self.assertGreaterEqual(selected[-1].timestamp, 106.0)
 
     def test_evidence_ledger_structure(self) -> None:
         """Test that evidence ledger has the required typed fields."""
@@ -142,12 +166,56 @@ class AccuracyPipelineTests(unittest.TestCase):
             self.assertIn("claims", evidence)
             self.assertIn("subjects", evidence)
             self.assertEqual(evidence["setting"], "urban street")
+            self.assertLessEqual(client.calls[0]["kwargs"]["timeout_seconds"], 10.0)
+
+    def test_candidate_batch_uses_supported_schema_and_one_call(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            def chat(self, model, messages, **kwargs):
+                self.calls.append({"model": model, "messages": messages, "kwargs": kwargs})
+                return json.dumps({
+                    "candidates_by_style": {
+                        "formal": ["A person walks along a street."],
+                        "sarcastic": ["A person walks along a street, because apparently sidewalks need supervision."],
+                    }
+                })
+
+        pipeline = object.__new__(CaptionPipeline)
+        pipeline.client = FakeClient()
+        pipeline.settings = Settings(
+            api_key="", model="vision", caption_model="style", judge_model="judge",
+        )
+        result = pipeline._generate_candidates_all_styles(
+            dict(EMPTY_EVIDENCE),
+            ["formal", "sarcastic"],
+            num_candidates=2,
+            timeout_seconds=4.0,
+        )
+        self.assertEqual(len(pipeline.client.calls), 1)
+        schema_text = json.dumps(pipeline.client.calls[0]["kwargs"]["json_schema"])
+        self.assertNotIn("minItems", schema_text)
+        self.assertNotIn("maxItems", schema_text)
+        self.assertEqual(set(result), {"formal", "sarcastic"})
 
     def test_fallbacks_cover_every_style_with_distinct_tones(self) -> None:
         captions = fallback_captions(DEFAULT_STYLES)
         self.assertEqual(set(captions), set(DEFAULT_STYLES))
         self.assertEqual(len(set(captions.values())), len(DEFAULT_STYLES))
         self.assertEqual(task_styles({"styles": ["formal"]}), ["formal"])
+        with self.assertRaises(ValueError):
+            task_styles({"styles": ["unsupported"]})
+
+    def test_missing_input_is_a_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            missing = Path(temp_dir_name) / "missing.json"
+            with self.assertRaises(FileNotFoundError):
+                read_tasks(missing)
+
+    def test_live_evaluation_requires_real_pipeline_and_judge(self) -> None:
+        with self.assertRaises(ValueError):
+            run_evaluation(dry_run=False)
 
     def test_grounded_check_returns_continuous_scores(self) -> None:
         """Test that the check function returns continuous scores, not just pass/fail."""

@@ -33,18 +33,17 @@ def truthy(value: str | None) -> bool:
 
 def read_tasks(input_path: Path) -> list[dict[str, Any]]:
     if not input_path.exists():
-        print(f"Input task file not found at {input_path}; writing empty results.", file=sys.stderr)
-        return []
+        raise FileNotFoundError(f"Input task file not found at {input_path}.")
 
     try:
         payload = json.loads(input_path.read_text(encoding="utf-8-sig"))
     except Exception as exc:
-        print(f"Could not read {input_path}: {exc}; writing empty results.", file=sys.stderr)
-        return []
+        raise ValueError(f"Could not read {input_path}: {exc}") from exc
 
     if not isinstance(payload, list):
-        print(f"{input_path} must contain a JSON array; writing empty results.", file=sys.stderr)
-        return []
+        raise ValueError(f"{input_path} must contain a JSON array.")
+    if not all(isinstance(task, dict) for task in payload):
+        raise ValueError(f"{input_path} must contain only JSON objects.")
     return payload
 
 
@@ -97,9 +96,18 @@ def fallback_captions(styles: list[str]) -> dict[str, str]:
 
 def task_styles(task: dict[str, Any]) -> list[str]:
     styles = task.get("styles")
-    if isinstance(styles, list) and styles:
-        return [s for s in styles if s in DEFAULT_STYLES]
-    return list(DEFAULT_STYLES)
+    if styles is None:
+        return list(DEFAULT_STYLES)
+    if not isinstance(styles, list) or not styles:
+        raise ValueError("Task styles must be a non-empty JSON array.")
+
+    requested: list[str] = []
+    for style in styles:
+        if style not in DEFAULT_STYLES:
+            raise ValueError(f"Unsupported requested style: {style!r}")
+        if style not in requested:
+            requested.append(style)
+    return requested
 
 
 def write_results_atomic(output_path: Path, results: list[dict[str, Any]]) -> None:
@@ -230,7 +238,7 @@ def run_harness(input_path: Path, output_path: Path) -> int:
                 str(task.get("video_url", "")),
                 video_dir,
                 str(task.get("task_id", "")),
-                45.0,
+                min(45.0, per_clip_deadline),
             )
 
         if not dry_run:
@@ -240,6 +248,7 @@ def run_harness(input_path: Path, output_path: Path) -> int:
 
         for task_index, task in enumerate(tasks):
             task_started_at = time.monotonic()
+            clip_deadline = task_started_at + per_clip_deadline
             task_id = str(task.get("task_id", ""))
             video_url = str(task.get("video_url", ""))
             styles = task_styles(task)
@@ -268,14 +277,20 @@ def run_harness(input_path: Path, output_path: Path) -> int:
                     video_path = video_dir / f"{task_id}.mp4"
                     download_seconds = 0.0
                 else:
-                    remaining_for_download = max(5.0, hard_deadline_seconds - elapsed)
+                    remaining_for_download = max(
+                        0.5,
+                        min(
+                            hard_deadline_seconds - elapsed,
+                            clip_deadline - time.monotonic(),
+                        ),
+                    )
                     download_started_at = time.monotonic()
                     download_future = download_futures.pop(task_index, None)
                     if download_future is None:
                         submit_download(task_index)
                         download_future = download_futures.pop(task_index)
                     submit_download(task_index + prefetch_depth)
-                    video_path = download_future.result(timeout=min(45.0, remaining_for_download))
+                    video_path = download_future.result(timeout=remaining_for_download)
                     download_seconds = time.monotonic() - download_started_at
                 asset = VideoAsset(video_id=task_id, path=video_path)
 
@@ -294,7 +309,6 @@ def run_harness(input_path: Path, output_path: Path) -> int:
                     force_fallback_captions = True
 
                 # Per-clip deadline enforcement
-                clip_deadline = task_started_at + per_clip_deadline
                 remaining_clip_time = clip_deadline - time.monotonic()
                 if remaining_clip_time <= 2.0:
                     force_fallback_captions = True
@@ -306,7 +320,7 @@ def run_harness(input_path: Path, output_path: Path) -> int:
                     frame_profile=frame_profile,
                     enable_style_retry=task_enable_style_retry,
                     force_fallback_captions=force_fallback_captions,
-                    caption_fallback_deadline=caption_fallback_deadline,
+                    caption_fallback_deadline=min(caption_fallback_deadline, clip_deadline),
                 )
                 captions = processed.get("captions", {})
                 output_results[task_index] = {
