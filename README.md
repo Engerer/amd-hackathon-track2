@@ -106,6 +106,22 @@ http://127.0.0.1:8501
 
 Advanced settings are in the collapsed sidebar. Most users can leave them unchanged.
 
+## Deploy The Demo
+
+The repository is ready for Streamlit Community Cloud:
+
+- Repository: `Engerer/amd-hackathon-track2`
+- Branch: `master`
+- Main file: `app.py`
+- Python dependencies: `requirements.txt`
+- System dependency: `ffmpeg` from `packages.txt`
+
+Set this root-level Streamlit secret so the hosted demo uses the same model proxy as the submission image:
+
+```toml
+MODEL_PROXY_URL = "https://track2-fireworks-proxy.proxide-track2.workers.dev"
+```
+
 ## Run A Dry Test
 
 Dry-run mode checks the input/output flow without spending Fireworks credits.

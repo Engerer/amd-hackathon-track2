@@ -37,9 +37,16 @@ STYLE_LABELS = {
     "humorous_tech": "Humorous-tech",
     "humorous_non_tech": "Humorous non-tech",
 }
-DEFAULT_FRAME_COUNT = 32
-FRAME_OPTIONS = [10, 16, 24, 32]
+DEFAULT_FRAME_COUNT = 15
+FRAME_OPTIONS = [5, 10, 15, 20]
 MAX_SESSION_RESULTS = 20
+
+
+def streamlit_secret(name: str) -> str:
+    try:
+        return str(st.secrets.get(name, "")).strip()
+    except (FileNotFoundError, KeyError):
+        return ""
 
 
 def compact_model_name(model: str) -> str:
@@ -211,6 +218,8 @@ def main() -> None:
     ensure_dirs()
 
     defaults = load_settings()
+    default_proxy_url = defaults.proxy_url or streamlit_secret("MODEL_PROXY_URL")
+    default_proxy_token = defaults.proxy_token or streamlit_secret("MODEL_PROXY_TOKEN")
     if "results" not in st.session_state:
         st.session_state.results = []
 
@@ -234,7 +243,7 @@ def main() -> None:
         unsafe_allow_html=True,
     )
 
-    default_backend = "Proxy" if defaults.proxy_url else "Direct Fireworks"
+    default_backend = "Proxy" if default_proxy_url else "Direct Fireworks"
     frame_options = sorted(set(FRAME_OPTIONS + [DEFAULT_FRAME_COUNT]))
     source_mode = "Upload"
     dry_run = not bool(defaults.api_key or defaults.proxy_url)
@@ -246,8 +255,8 @@ def main() -> None:
     force_transcribe = False
     backend = default_backend
     api_key = os.getenv("FIREWORKS_API_KEY", "")
-    proxy_url = defaults.proxy_url
-    proxy_token = defaults.proxy_token
+    proxy_url = default_proxy_url
+    proxy_token = default_proxy_token
     model = defaults.model
     caption_model = defaults.caption_model
     judge_model = defaults.judge_model
@@ -255,7 +264,7 @@ def main() -> None:
     st.title("Track 2 Caption Studio")
     st.caption(
         f"vision {compact_model_name(model)} -> captions {compact_model_name(caption_model)} | "
-        f"anchored {DEFAULT_FRAME_COUNT}-frame sampling | checks off"
+        f"hybrid {DEFAULT_FRAME_COUNT}-frame sampling | checks off"
     )
 
     with st.sidebar:
@@ -279,8 +288,8 @@ def main() -> None:
                 disabled=dry_run,
             )
             if backend == "Proxy":
-                proxy_url = st.text_input("Proxy URL", value=defaults.proxy_url, disabled=dry_run)
-                proxy_token = st.text_input("Proxy token", value=defaults.proxy_token, type="password", disabled=dry_run)
+                proxy_url = st.text_input("Proxy URL", value=default_proxy_url, disabled=dry_run)
+                proxy_token = st.text_input("Proxy token", value=default_proxy_token, type="password", disabled=dry_run)
             else:
                 api_key = st.text_input("Fireworks API key", value=api_key, type="password", disabled=dry_run)
 
@@ -292,7 +301,7 @@ def main() -> None:
         st.metric("Vision", compact_model_name(model))
         st.metric("Caption", compact_model_name(caption_model))
         st.metric("Frames", max_frames)
-        st.metric("Sampling", "Anchored")
+        st.metric("Sampling", "Hybrid")
         st.metric(
             "Duration",
             f"{format_duration(MIN_VIDEO_DURATION_SECONDS)}-{format_duration(MAX_VIDEO_DURATION_SECONDS)}",
