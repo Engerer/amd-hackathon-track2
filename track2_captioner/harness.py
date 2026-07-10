@@ -100,8 +100,7 @@ def fallback_captions(styles: list[str]) -> dict[str, str]:
 
 
 def task_styles(task: dict[str, Any]) -> list[str]:
-    styles = task.get("styles") or DEFAULT_STYLES
-    return [str(style) for style in styles]
+    return list(DEFAULT_STYLES)
 
 
 def write_results(output_path: Path, results: list[dict[str, Any]]) -> None:

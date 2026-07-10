@@ -30,9 +30,9 @@ video URL
  -> download video
  -> ffprobe checks duration
  -> OpenCV preserves timeline anchors and scores extra candidates for sharpness, exposure, and motion
- -> resize each frame to 768px width
- -> build one high-quality storyboard containing all five frames
- -> Qwen3.7 Plus receives only that storyboard image
+ -> resize each frame to 1920px width (1920x1080 for 16:9 video)
+ -> overlay a visible frame number, timestamp, and total duration banner without changing resolution
+ -> Qwen3.7 Plus receives all five timestamped frames in one multimodal request
  -> Qwen3.7 Plus writes all requested style captions in one multimodal JSON call
  -> Docker writes /output/results.json
 ```
@@ -59,14 +59,14 @@ The prompt establishes one shared factual core before generating all four styles
 - Caption model setting: also `accounts/fireworks/models/qwen3p7-plus` for compatibility
 - Frame sampling: five hybrid timeline and salience frames
 - Frame cap: exactly `5` total frames for 30-120 second clips
-- Frame width: `768px`
-- Model input: one detailed five-frame storyboard and no separate frame images
+- Frame width: `1920px` (`1920x1080` for 16:9 video)
+- Model input: five separate timestamped frame images sent simultaneously
 - Whisper audio transcription: off by default in Docker
 - Volume-only audio cues: off by default in Docker
 - Internal judge checks: off by default
 - Fireworks key: stored in a Cloudflare Worker secret, not in the repo
 
-Important: Qwen receives one image per clip. That image is a three-column, high-quality JPEG storyboard containing all five chronological frames.
+Important: Qwen receives exactly five images per clip in a single request. Each image is labeled with its frame number, timestamp, and the full video duration, and the prompt repeats the same timing metadata.
 
 ## Quick Start
 
@@ -101,7 +101,7 @@ http://127.0.0.1:8501
 1. Open the app.
 2. Upload one or more videos.
 3. Click **Generate captions**.
-4. Review the sampled storyboard frames, observations, and four captions for each video.
+4. Review the sampled timestamped frames, observations, and four captions for each video.
 5. Download the JSON if needed.
 
 Advanced settings are in the collapsed sidebar. Most users can leave them unchanged.
@@ -263,7 +263,7 @@ WHISPER_LANGUAGE=en
 MODEL_PROXY_URL=https://track2-fireworks-proxy.proxide-track2.workers.dev
 FIREWORKS_MODEL=accounts/fireworks/models/qwen3p7-plus
 FIREWORKS_CAPTION_MODEL=accounts/fireworks/models/qwen3p7-plus
-FIREWORKS_CAPTION_MAX_TOKENS=700
+FIREWORKS_CAPTION_MAX_TOKENS=800
 FIREWORKS_CREATIVE_TEMPERATURE=0.45
 FIREWORKS_MAX_RETRIES=1
 FIREWORKS_REQUEST_TIMEOUT_SECONDS=28
@@ -281,7 +281,7 @@ TRACK2_ENABLE_STYLE_RETRY=false
 TRACK2_AUDIO_CUES=false
 TRACK2_MAX_TRANSCRIBED_CLIPS=0
 TRACK2_TRANSCRIBE_MAX_DURATION_SECONDS=90
-FIREWORKS_CAPTION_MAX_TOKENS=700
+FIREWORKS_CAPTION_MAX_TOKENS=800
 FIREWORKS_CREATIVE_TEMPERATURE=0.45
 FIREWORKS_MAX_RETRIES=1
 FIREWORKS_REQUEST_TIMEOUT_SECONDS=28

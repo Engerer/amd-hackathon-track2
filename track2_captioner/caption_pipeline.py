@@ -2,20 +2,25 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
 from track2_captioner.config import Settings
 from track2_captioner.fireworks_client import FireworksClient, image_to_data_url
 from track2_captioner.json_tools import parse_json_object
 from track2_captioner.prompts import STYLE_PROMPTS, load_prompt
-from track2_captioner.video_ingest import DEFAULT_FRAME_PROFILE, DEFAULT_MAX_FRAMES, VideoAsset, extract_frames
+from track2_captioner.video_ingest import (
+    DEFAULT_FRAME_PROFILE,
+    DEFAULT_MAX_FRAMES,
+    VideoAsset,
+    extract_frames,
+    probe_duration_seconds,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -53,8 +58,8 @@ DIRECT_CAPTION_SYSTEM = (
     "Inspect the sampled video frames in chronological order and generate final captions directly. "
     "Establish one shared factual core before writing any styled captions. Return strict JSON only."
 )
-STORYBOARD_COLUMNS = 3
-STORYBOARD_THUMB_WIDTH = 512
+TIMESTAMP_BANNER_HEIGHT = 64
+TIMESTAMP_FONT_SIZE = 32
 
 HUMOR_NON_TECH_WORDS = {
     "actually",
@@ -224,7 +229,7 @@ class CaptionPipeline:
     ) -> dict[str, Any]:
         started_at = time.monotonic()
         timings: dict[str, float] = {}
-        selected_styles = [style for style in (styles or list(STYLE_PROMPTS)) if style in STYLE_PROMPTS]
+        selected_styles = list(STYLE_PROMPTS)
 
         frame_dir = self.work_dir / asset.video_id
         should_fallback = force_fallback_captions or (
@@ -234,6 +239,7 @@ class CaptionPipeline:
         frame_started_at = time.monotonic()
         frames: list[Path] = []
         model_images: list[Path] = []
+        video_duration = None if self.dry_run else probe_duration_seconds(asset.path)
         if not should_fallback:
             frames = [] if self.dry_run else extract_frames(
                 asset.path,
@@ -241,7 +247,7 @@ class CaptionPipeline:
                 max_frames or self.max_frames,
                 frame_profile=frame_profile,
             )
-            model_images = self._prepare_model_images(frames, frame_dir)
+            model_images = self._prepare_model_images(frames, frame_dir, video_duration)
         timings["frame_extraction_sec"] = time.monotonic() - frame_started_at
 
         transcript = self._read_transcript(asset)
@@ -257,6 +263,7 @@ class CaptionPipeline:
                 asset=asset,
                 model_images=model_images,
                 source_frame_count=len(frames),
+                video_duration=video_duration,
                 transcript=transcript,
                 audio_context=audio_context,
                 styles=selected_styles,
@@ -283,6 +290,7 @@ class CaptionPipeline:
             "frame_count": len(frames),
             "model_images": [str(image) for image in model_images],
             "model_image_count": len(model_images),
+            "duration_seconds": video_duration,
             "sampling_strategy": frames[0].parent.name if frames else "none",
             "observations": observations,
             "captions": captions,
@@ -290,53 +298,95 @@ class CaptionPipeline:
             "timings": timings,
         }
 
-    def _prepare_model_images(self, frames: list[Path], frame_dir: Path) -> list[Path]:
+    def _prepare_model_images(
+        self,
+        frames: list[Path],
+        frame_dir: Path,
+        video_duration: float | None,
+    ) -> list[Path]:
         if not frames:
             return []
+        if len(frames) != 5:
+            raise ValueError(f"Expected exactly 5 frames, received {len(frames)}.")
 
-        storyboard_path = frame_dir / "storyboard" / "storyboard.jpg"
-        self._build_storyboard(frames, storyboard_path)
-        return [storyboard_path]
+        output_dir = frame_dir / "timestamped"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        prepared: list[Path] = []
+        for index, frame_path in enumerate(frames):
+            timestamp = self._frame_timestamp(frame_path, index, len(frames), video_duration)
+            output_path = output_dir / f"frame_{index + 1:03d}_t{timestamp:09.3f}.jpg"
+            self._add_timestamp_banner(
+                frame_path,
+                output_path,
+                index=index,
+                frame_count=len(frames),
+                timestamp=timestamp,
+                video_duration=video_duration,
+            )
+            prepared.append(output_path)
+        return prepared
 
     @staticmethod
-    def _build_storyboard(frames: list[Path], output_path: Path) -> None:
-        loaded: list[Image.Image] = []
-        for frame_path in frames:
-            with Image.open(frame_path) as image:
-                image = image.convert("RGB")
-                scale = STORYBOARD_THUMB_WIDTH / max(image.width, 1)
-                target_height = max(1, round(image.height * scale))
-                loaded.append(image.resize((STORYBOARD_THUMB_WIDTH, target_height), Image.LANCZOS))
+    def _frame_timestamp(
+        frame_path: Path,
+        index: int,
+        frame_count: int,
+        video_duration: float | None,
+    ) -> float:
+        match = re.search(r"_t(\d+(?:\.\d+)?)", frame_path.stem)
+        if match:
+            return float(match.group(1))
+        if not video_duration or video_duration <= 0:
+            return float(index)
+        if frame_count <= 1:
+            return video_duration / 2
+        start = min(0.5, max(video_duration * 0.05, 0.0))
+        end = max(video_duration - 0.5, start)
+        return start + ((end - start) * (index / (frame_count - 1)))
 
-        if not loaded:
-            raise ValueError("No frames available for storyboard.")
+    @staticmethod
+    def _format_timestamp(seconds: float | None) -> str:
+        if seconds is None or seconds < 0:
+            return "unknown"
+        minutes = int(seconds // 60)
+        remainder = seconds - (minutes * 60)
+        return f"{minutes:02d}:{remainder:04.1f}"
 
-        columns = min(STORYBOARD_COLUMNS, len(loaded))
-        rows = math.ceil(len(loaded) / columns)
-        gutter = 8
-        label_height = 26
-        thumb_height = max(image.height for image in loaded)
-        cell_height = label_height + thumb_height
-        width = (columns * STORYBOARD_THUMB_WIDTH) + ((columns + 1) * gutter)
-        height = (rows * cell_height) + ((rows + 1) * gutter)
-        canvas = Image.new("RGB", (width, height), (244, 244, 244))
+    @staticmethod
+    def _timestamp_font() -> ImageFont.ImageFont | ImageFont.FreeTypeFont:
+        try:
+            return ImageFont.truetype("DejaVuSans.ttf", TIMESTAMP_FONT_SIZE)
+        except OSError:
+            return ImageFont.load_default()
+
+    @classmethod
+    def _add_timestamp_banner(
+        cls,
+        source_path: Path,
+        output_path: Path,
+        index: int,
+        frame_count: int,
+        timestamp: float,
+        video_duration: float | None,
+    ) -> None:
+        with Image.open(source_path) as source:
+            image = source.convert("RGB")
+        canvas = image.copy()
+        label = (
+            f"Frame {index + 1}/{frame_count}  |  "
+            f"{cls._format_timestamp(timestamp)} / total {cls._format_timestamp(video_duration)}"
+        )
         draw = ImageDraw.Draw(canvas)
-
-        for index, image in enumerate(loaded):
-            row = index // columns
-            column = index % columns
-            x = gutter + (column * (STORYBOARD_THUMB_WIDTH + gutter))
-            y = gutter + (row * (cell_height + gutter))
-            draw.rectangle(
-                [x, y, x + STORYBOARD_THUMB_WIDTH, y + label_height],
-                fill=(24, 24, 24),
-            )
-            draw.text((x + 8, y + 6), f"Frame {index + 1}/{len(loaded)}", fill=(255, 255, 255))
-            paste_y = y + label_height
-            if image.height < thumb_height:
-                paste_y += (thumb_height - image.height) // 2
-            canvas.paste(image, (x, paste_y))
-
+        draw.rectangle(
+            (0, 0, canvas.width, min(TIMESTAMP_BANNER_HEIGHT, canvas.height)),
+            fill=(20, 20, 20),
+        )
+        draw.text(
+            (18, 12),
+            label,
+            fill=(255, 255, 255),
+            font=cls._timestamp_font(),
+        )
         output_path.parent.mkdir(parents=True, exist_ok=True)
         canvas.save(output_path, format="JPEG", quality=90, optimize=True)
 
@@ -345,6 +395,7 @@ class CaptionPipeline:
         asset: VideoAsset,
         model_images: list[Path],
         source_frame_count: int,
+        video_duration: float | None,
         transcript: str,
         audio_context: str,
         styles: list[str],
@@ -358,6 +409,7 @@ class CaptionPipeline:
             asset,
             model_images,
             source_frame_count,
+            video_duration,
             transcript,
             audio_context,
             styles,
@@ -385,6 +437,7 @@ class CaptionPipeline:
                     asset,
                     model_images,
                     source_frame_count,
+                    video_duration,
                     transcript,
                     audio_context,
                     styles,
@@ -403,6 +456,7 @@ class CaptionPipeline:
         asset: VideoAsset,
         model_images: list[Path],
         source_frame_count: int,
+        video_duration: float | None,
         transcript: str,
         audio_context: str,
         styles: list[str],
@@ -412,11 +466,22 @@ class CaptionPipeline:
             for style in styles
             if style in STYLE_DESCRIPTIONS
         }
-        visual_input = self._visual_input_description(model_images, source_frame_count)
+        frame_timestamps = [
+            round(self._frame_timestamp(frame, index, len(model_images), video_duration), 3)
+            for index, frame in enumerate(model_images)
+        ]
+        visual_input = self._visual_input_description(
+            model_images,
+            source_frame_count,
+            video_duration,
+        )
         request = {
             "video_id": asset.video_id,
-            "task": "Generate final captions directly from the sampled video evidence.",
+            "task": "Use the five timestamped frames to generate all four final caption styles in one response.",
             "visual_input": visual_input,
+            "video_duration_seconds": round(video_duration, 3) if video_duration else None,
+            "video_duration": self._format_timestamp(video_duration),
+            "frame_timestamps_seconds": frame_timestamps,
             "requested_styles": style_requirements,
             "style_templates": {
                 style: STYLE_TEMPLATES[style]
@@ -427,6 +492,8 @@ class CaptionPipeline:
             "optional_audio_context": audio_context or "[none provided]",
             "rules": [
                 "Use the frames as the primary source of truth.",
+                "These are exactly five chronological frames sampled from one video, not five separate images or videos.",
+                "Use each frame timestamp and the total video duration to reason about chronology and change over time.",
                 "First establish one core_facts object containing the shared subject, action, setting, and important objects.",
                 "Every styled caption must preserve the same core subject, action, and setting; style may change wording but not facts.",
                 "Begin each caption with a recognizable factual clause before adding sarcasm or humor.",
@@ -436,8 +503,7 @@ class CaptionPipeline:
                 "If visible text is important, incorporate it naturally in captions as a human viewer would.",
                 "Use transcript or audio context only as supporting evidence; do not invent exact speech, music, or sounds.",
                 "Write every caption in English.",
-                "Treat frames as chronological samples from one video.",
-                "If a storyboard is provided, read frames by their numbers from left to right and top to bottom.",
+                "Treat the five images as chronological samples from one video in Frame 1 through Frame 5 order.",
                 "Mention the main subject, setting, and primary action when visible.",
                 "Use only visible or transcript-backed facts; do not invent motives, identities, locations, speech, or hidden context.",
                 "Never turn uncertainty into a concrete claim.",
@@ -457,7 +523,18 @@ class CaptionPipeline:
                 "text": json.dumps(request, indent=2),
             }
         ]
-        for frame in model_images:
+        for index, frame in enumerate(model_images):
+            timestamp = frame_timestamps[index]
+            content.append(
+                {
+                    "type": "text",
+                    "text": (
+                        f"Frame {index + 1}/{len(model_images)} at "
+                        f"{self._format_timestamp(timestamp)} of total "
+                        f"{self._format_timestamp(video_duration)}."
+                    ),
+                }
+            )
             content.append(
                 {
                     "type": "image_url",
@@ -467,10 +544,15 @@ class CaptionPipeline:
         return content
 
     @staticmethod
-    def _visual_input_description(model_images: list[Path], source_frame_count: int) -> str:
+    def _visual_input_description(
+        model_images: list[Path],
+        source_frame_count: int,
+        video_duration: float | None,
+    ) -> str:
         return (
-            f"The only attached image is a detailed storyboard containing {source_frame_count} "
-            "sampled video frames in chronological order, numbered left-to-right and top-to-bottom."
+            f"Exactly {source_frame_count} images are attached simultaneously. They are five "
+            f"timestamped frames sampled from one {CaptionPipeline._format_timestamp(video_duration)} "
+            "video and are ordered chronologically from Frame 1 to Frame 5."
         )
 
     def _retry_direct_captions(
@@ -478,6 +560,7 @@ class CaptionPipeline:
         asset: VideoAsset,
         model_images: list[Path],
         source_frame_count: int,
+        video_duration: float | None,
         transcript: str,
         audio_context: str,
         styles: list[str],
@@ -490,7 +573,12 @@ class CaptionPipeline:
             "task": "Repair the direct video captions using the frames again.",
             "issues": issues,
             "current_captions": current_captions,
-            "visual_input": self._visual_input_description(model_images, source_frame_count),
+            "visual_input": self._visual_input_description(
+                model_images,
+                source_frame_count,
+                video_duration,
+            ),
+            "video_duration_seconds": round(video_duration, 3) if video_duration else None,
             "requested_styles": {
                 style: STYLE_DESCRIPTIONS[style]
                 for style in styles
@@ -514,7 +602,18 @@ class CaptionPipeline:
             "response_schema": CAPTION_SCHEMA,
         }
         content: list[dict[str, Any]] = [{"type": "text", "text": json.dumps(repair_request, indent=2)}]
-        for frame in model_images:
+        for index, frame in enumerate(model_images):
+            timestamp = self._frame_timestamp(frame, index, len(model_images), video_duration)
+            content.append(
+                {
+                    "type": "text",
+                    "text": (
+                        f"Frame {index + 1}/{len(model_images)} at "
+                        f"{self._format_timestamp(timestamp)} of total "
+                        f"{self._format_timestamp(video_duration)}."
+                    ),
+                }
+            )
             content.append({"type": "image_url", "image_url": {"url": image_to_data_url(frame)}})
 
         response = self.client.chat(

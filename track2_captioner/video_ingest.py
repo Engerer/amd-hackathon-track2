@@ -156,6 +156,10 @@ def _sample_timestamps(duration: float | None, max_frames: int) -> list[float]:
     return timestamps
 
 
+def _timestamped_frame_name(index: int, timestamp: float) -> str:
+    return f"frame_{index:03d}_t{max(timestamp, 0.0):09.3f}.jpg"
+
+
 def _extract_anchor_frames(video_path: Path, frame_dir: Path, max_frames: int, width: int) -> list[Path]:
     _reset_dir(frame_dir)
     duration = probe_duration_seconds(video_path)
@@ -165,7 +169,7 @@ def _extract_anchor_frames(video_path: Path, frame_dir: Path, max_frames: int, w
 
     frames: list[Path] = []
     for index, timestamp in enumerate(timestamps, start=1):
-        output_path = frame_dir / f"frame_{index:03d}.jpg"
+        output_path = frame_dir / _timestamped_frame_name(index, timestamp)
         command = [
             "ffmpeg",
             "-y",
@@ -467,7 +471,7 @@ def _extract_adaptive_frames_opencv(
             if original_width > 0:
                 target_height = max(1, round(height * (width / original_width)))
                 frame = cv2.resize(frame, (width, target_height), interpolation=cv2.INTER_AREA)
-            output_path = frame_dir / f"frame_{index:03d}.jpg"
+            output_path = frame_dir / _timestamped_frame_name(index, candidate.timestamp)
             if cv2.imwrite(str(output_path), frame):
                 frames.append(output_path)
         return frames
@@ -509,7 +513,7 @@ def _extract_timestamp_frames_opencv(
             if original_width > 0:
                 target_height = max(1, round(height * (width / original_width)))
                 frame = cv2.resize(frame, (width, target_height), interpolation=cv2.INTER_AREA)
-            output_path = frame_dir / f"frame_{index:03d}.jpg"
+            output_path = frame_dir / _timestamped_frame_name(index, timestamp)
             if cv2.imwrite(str(output_path), frame):
                 frames.append(output_path)
         return frames
@@ -521,7 +525,7 @@ def extract_frames(
     video_path: Path,
     frame_dir: Path,
     max_frames: int = DEFAULT_MAX_FRAMES,
-    width: int = 768,
+    width: int = 1920,
     frame_profile: str = DEFAULT_FRAME_PROFILE,
 ) -> list[Path]:
     frame_dir.mkdir(parents=True, exist_ok=True)
@@ -539,9 +543,15 @@ def extract_frames(
                 width,
                 frame_profile,
             )
-            if hybrid_frames:
+            if len(hybrid_frames) == effective_max:
                 logger.info("Hybrid selection: kept %d frames.", len(hybrid_frames))
                 return hybrid_frames
+            if hybrid_frames:
+                logger.warning(
+                    "Hybrid selection returned %d / %d frames; using timeline fallback.",
+                    len(hybrid_frames),
+                    effective_max,
+                )
         except Exception:
             logger.warning("Hybrid OpenCV selection failed; using timeline fallback.", exc_info=True)
 
@@ -553,14 +563,20 @@ def extract_frames(
                 effective_max,
                 width,
             )
-            if fast_frames:
+            if len(fast_frames) == effective_max:
                 logger.info("Timeline selection: kept %d frames.", len(fast_frames))
                 return fast_frames
+            if fast_frames:
+                logger.warning(
+                    "Timeline selection returned %d / %d frames; using ffmpeg fallback.",
+                    len(fast_frames),
+                    effective_max,
+                )
         except Exception:
             logger.warning("Fast OpenCV frame selection failed; using ffmpeg fallback.", exc_info=True)
 
         anchor_frames = _extract_anchor_frames(video_path, frame_dir / "anchor", effective_max, width)
-        if anchor_frames:
+        if len(anchor_frames) == effective_max:
             return anchor_frames
 
     try:
@@ -571,28 +587,29 @@ def extract_frames(
             width,
             frame_profile,
         )
-        if adaptive_frames:
+        if len(adaptive_frames) == effective_max:
             logger.info("Adaptive selection: kept %d frames.", len(adaptive_frames))
             return adaptive_frames
     except Exception:
         logger.warning("Adaptive OpenCV frame selection failed; using ffmpeg fallback.", exc_info=True)
 
     scene_frames = _extract_scene_frames(video_path, frame_dir / "scene", effective_max, width)
-    minimum_scene_frames = max(3, min(effective_max, effective_max // 2))
+    minimum_scene_frames = effective_max
     if len(scene_frames) >= minimum_scene_frames:
         return scene_frames
 
-    minimum_frames = max(1, min(effective_max, 3))
+    minimum_frames = effective_max
     anchor_frames = _extract_anchor_frames(video_path, frame_dir / "anchor", effective_max, width)
     if len(anchor_frames) >= minimum_frames:
         return anchor_frames
 
     uniform_frames = _extract_uniform_frames(video_path, frame_dir / "uniform", effective_max, width)
-    if uniform_frames:
+    if len(uniform_frames) >= effective_max:
         return uniform_frames
 
-    if anchor_frames:
+    if len(anchor_frames) >= effective_max:
         return anchor_frames
 
-    if not uniform_frames:
-        raise RuntimeError(f"Could not extract frames from {video_path}")
+    raise RuntimeError(
+        f"Could not extract the required {effective_max} frames from {video_path}"
+    )
