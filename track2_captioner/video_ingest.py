@@ -14,10 +14,10 @@ logger = logging.getLogger(__name__)
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
 MIN_VIDEO_DURATION_SECONDS = 30.0
-MAX_VIDEO_DURATION_SECONDS = 240.0
+MAX_VIDEO_DURATION_SECONDS = 120.0
 DURATION_TOLERANCE_SECONDS = 0.5
-ABSOLUTE_MAX_FRAMES = 20
-DEFAULT_MAX_FRAMES = 15
+ABSOLUTE_MAX_FRAMES = 5
+DEFAULT_MAX_FRAMES = 5
 DEFAULT_FRAME_PROFILE = "hybrid"
 FAST_FRAME_PROFILES = {"fast", "storyboard"}
 HYBRID_FRAME_PROFILES = {"hybrid", "accuracy"}
@@ -248,7 +248,7 @@ def compute_dynamic_frame_count(
         return cap
     profile = (frame_profile or DEFAULT_FRAME_PROFILE).lower()
     if profile in FAST_FRAME_PROFILES or profile in HYBRID_FRAME_PROFILES:
-        return min(15, cap)
+        return min(5, cap)
     if profile != "balanced":
         return cap
     if duration_seconds <= 45:

@@ -23,7 +23,7 @@ https://github.com/Engerer/amd-hackathon-track2
 
 ## How It Works
 
-The pipeline samples timeline evidence instead of processing every video frame. By default it keeps 10 uniformly distributed timeline anchors and adds 5 sharp, salient frames selected from a lightweight OpenCV candidate scan.
+The pipeline samples timeline evidence instead of processing every video frame. For every 30-120 second clip, it selects exactly five detailed frames with broad beginning-to-end coverage and sharp salient evidence.
 
 ```text
 video URL
@@ -31,8 +31,8 @@ video URL
  -> ffprobe checks duration
  -> OpenCV preserves timeline anchors and scores extra candidates for sharpness, exposure, and motion
  -> resize each frame to 768px width
- -> build one overview storyboard and select three higher-resolution detail frames
- -> Qwen3.7 Plus receives the overview and details directly
+ -> build one high-quality storyboard containing all five frames
+ -> Qwen3.7 Plus receives only that storyboard image
  -> Qwen3.7 Plus writes all requested style captions in one multimodal JSON call
  -> Docker writes /output/results.json
 ```
@@ -57,16 +57,16 @@ The prompt establishes one shared factual core before generating all four styles
 
 - Direct multimodal model: `accounts/fireworks/models/qwen3p7-plus`
 - Caption model setting: also `accounts/fireworks/models/qwen3p7-plus` for compatibility
-- Frame sampling: hybrid timeline anchors plus sharp salient candidates
-- Frame cap: `15` total frames per video by default, hard-capped at `20`
+- Frame sampling: five hybrid timeline and salience frames
+- Frame cap: exactly `5` total frames for 30-120 second clips
 - Frame width: `768px`
-- Model input: one 15-frame overview plus three high-resolution detail images
+- Model input: one detailed five-frame storyboard and no separate frame images
 - Whisper audio transcription: off by default in Docker
 - Volume-only audio cues: off by default in Docker
 - Internal judge checks: off by default
 - Fireworks key: stored in a Cloudflare Worker secret, not in the repo
 
-Important: `15` is a total-frame cap, not 15 FPS. Perceptual deduplication is not applied to the timed path, so fixed-camera clips retain their complete timeline coverage.
+Important: Qwen receives one image per clip. That image is a three-column, high-quality JPEG storyboard containing all five chronological frames.
 
 ## Quick Start
 
@@ -247,7 +247,7 @@ Useful variables:
 TRACK2_RUNTIME_TARGET_SECONDS=540
 TRACK2_HARD_DEADLINE_SECONDS=585
 TRACK2_FRAME_PROFILE=hybrid
-TRACK2_MAX_FRAMES=15
+TRACK2_MAX_FRAMES=5
 TRACK2_MODEL_CALL_RESERVE_SECONDS=75
 TRACK2_ENABLE_STYLE_RETRY=false
 TRACK2_AUDIO_CUES=false
@@ -275,7 +275,7 @@ Recommended final settings:
 RUN_CHECKS=false
 AUTO_TRANSCRIBE=off
 TRACK2_FRAME_PROFILE=hybrid
-TRACK2_MAX_FRAMES=15
+TRACK2_MAX_FRAMES=5
 TRACK2_MODEL_CALL_RESERVE_SECONDS=75
 TRACK2_ENABLE_STYLE_RETRY=false
 TRACK2_AUDIO_CUES=false

@@ -37,8 +37,7 @@ STYLE_LABELS = {
     "humorous_tech": "Humorous-tech",
     "humorous_non_tech": "Humorous non-tech",
 }
-DEFAULT_FRAME_COUNT = 15
-FRAME_OPTIONS = [5, 10, 15, 20]
+DEFAULT_FRAME_COUNT = 5
 MAX_SESSION_RESULTS = 20
 
 
@@ -244,7 +243,6 @@ def main() -> None:
     )
 
     default_backend = "Proxy" if default_proxy_url else "Direct Fireworks"
-    frame_options = sorted(set(FRAME_OPTIONS + [DEFAULT_FRAME_COUNT]))
     source_mode = "Upload"
     dry_run = not bool(defaults.api_key or defaults.proxy_url)
     max_frames = DEFAULT_FRAME_COUNT
@@ -271,7 +269,6 @@ def main() -> None:
         st.header("Preset")
         with st.expander("Advanced", expanded=False):
             source_mode = st.radio("Source", ["Upload", "data/videos"], horizontal=True)
-            max_frames = st.select_slider("Frame budget", options=frame_options, value=DEFAULT_FRAME_COUNT)
             dry_run = st.toggle("Dry run", value=dry_run)
             run_checks = st.toggle("Quality checks", value=False)
 

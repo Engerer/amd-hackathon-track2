@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageDraw, ImageFilter, ImageStat
+from PIL import Image, ImageDraw
 
 from track2_captioner.config import Settings
 from track2_captioner.fireworks_client import FireworksClient, image_to_data_url
@@ -53,9 +53,8 @@ DIRECT_CAPTION_SYSTEM = (
     "Inspect the sampled video frames in chronological order and generate final captions directly. "
     "Establish one shared factual core before writing any styled captions. Return strict JSON only."
 )
-STORYBOARD_COLUMNS = 4
-STORYBOARD_THUMB_WIDTH = 360
-DETAIL_IMAGE_COUNT = 3
+STORYBOARD_COLUMNS = 3
+STORYBOARD_THUMB_WIDTH = 512
 
 HUMOR_NON_TECH_WORDS = {
     "actually",
@@ -292,40 +291,12 @@ class CaptionPipeline:
         }
 
     def _prepare_model_images(self, frames: list[Path], frame_dir: Path) -> list[Path]:
-        if len(frames) <= 4:
-            return frames
-
-        storyboard_path = frame_dir / "storyboard" / "storyboard.jpg"
-        try:
-            self._build_storyboard(frames, storyboard_path)
-            detail_frames = self._select_detail_frames(frames, DETAIL_IMAGE_COUNT)
-            return [storyboard_path, *detail_frames]
-        except Exception:
-            logger.warning("Storyboard build failed; falling back to individual frames.", exc_info=True)
-            return frames
-
-    @staticmethod
-    def _select_detail_frames(frames: list[Path], count: int) -> list[Path]:
-        if count <= 0 or not frames:
+        if not frames:
             return []
 
-        selected: list[Path] = []
-        segment_count = min(count, len(frames))
-        for segment_index in range(segment_count):
-            start = round(len(frames) * (segment_index / segment_count))
-            end = round(len(frames) * ((segment_index + 1) / segment_count))
-            segment = frames[start:max(start + 1, end)]
-            selected.append(max(segment, key=CaptionPipeline._detail_frame_quality))
-        return selected
-
-    @staticmethod
-    def _detail_frame_quality(frame_path: Path) -> float:
-        with Image.open(frame_path) as image:
-            gray = image.convert("L").resize((256, 144), Image.Resampling.BILINEAR)
-            brightness = float(ImageStat.Stat(gray).mean[0])
-            edge_variance = float(ImageStat.Stat(gray.filter(ImageFilter.FIND_EDGES)).var[0])
-        exposure = max(0.2, 1.0 - (abs(brightness - 127.0) / 127.0))
-        return edge_variance * exposure
+        storyboard_path = frame_dir / "storyboard" / "storyboard.jpg"
+        self._build_storyboard(frames, storyboard_path)
+        return [storyboard_path]
 
     @staticmethod
     def _build_storyboard(frames: list[Path], output_path: Path) -> None:
@@ -367,7 +338,7 @@ class CaptionPipeline:
             canvas.paste(image, (x, paste_y))
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        canvas.save(output_path, format="JPEG", quality=82, optimize=True)
+        canvas.save(output_path, format="JPEG", quality=90, optimize=True)
 
     def _direct_captions(
         self,
@@ -497,19 +468,9 @@ class CaptionPipeline:
 
     @staticmethod
     def _visual_input_description(model_images: list[Path], source_frame_count: int) -> str:
-        if source_frame_count <= 1:
-            return "The attached image is one sampled video frame."
-        if len(model_images) > 1:
-            return (
-                f"The first attached image is an overview storyboard containing {source_frame_count} "
-                "chronological frames, numbered left-to-right and top-to-bottom. The remaining "
-                f"{len(model_images) - 1} images are higher-resolution detail views selected from "
-                "early, middle, and late portions of that same storyboard; they repeat evidence and "
-                "are not additional moments."
-            )
         return (
-            f"The attached image is a storyboard containing {source_frame_count} sampled video "
-            "frames in chronological order, numbered left-to-right and top-to-bottom."
+            f"The only attached image is a detailed storyboard containing {source_frame_count} "
+            "sampled video frames in chronological order, numbered left-to-right and top-to-bottom."
         )
 
     def _retry_direct_captions(
