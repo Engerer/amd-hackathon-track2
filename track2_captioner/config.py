@@ -47,7 +47,7 @@ def _truthy(val: str) -> bool:
 
 def load_settings() -> Settings:
     load_dotenv()
-    default_model = "accounts/fireworks/models/qwen3p7-plus"
+    default_model = "accounts/fireworks/models/kimi-k2p6"
     allowed_models = [
         model.strip()
         for model in os.getenv("ALLOWED_MODELS", "").split(",")

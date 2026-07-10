@@ -96,6 +96,9 @@ def fallback_captions(styles: list[str]) -> dict[str, str]:
 
 
 def task_styles(task: dict[str, Any]) -> list[str]:
+    styles = task.get("styles")
+    if isinstance(styles, list) and styles:
+        return [s for s in styles if s in DEFAULT_STYLES]
     return list(DEFAULT_STYLES)
 
 

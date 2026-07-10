@@ -4,7 +4,7 @@ import json
 import logging
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed, Future
+from concurrent.futures import ThreadPoolExecutor, as_completed, Future, TimeoutError
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +24,7 @@ from track2_captioner.video_ingest import (
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# JSON schemas for Fireworks schema-constrained generation
+# JSON schemas for Fireworks/Kimi schema-constrained generation
 # ---------------------------------------------------------------------------
 
 EVIDENCE_LEDGER_SCHEMA = {
@@ -90,37 +90,36 @@ EVIDENCE_LEDGER_SCHEMA = {
     ],
 }
 
-CAPTION_SINGLE_SCHEMA = {
+# Used to generate 2-3 candidates in one call per style
+CANDIDATE_GENERATION_SCHEMA = {
     "type": "object",
     "properties": {
-        "caption": {"type": "string"},
+        "candidates": {
+            "type": "array",
+            "items": {"type": "string"}
+        }
     },
-    "required": ["caption"],
+    "required": ["candidates"]
 }
 
-SELECTOR_SCHEMA = {
+# Dynamic multi-style selector schema
+SELECTOR_ALL_STYLES_SCHEMA = {
     "type": "object",
     "properties": {
-        "best_index": {"type": "integer"},
-        "factual_accuracy": {"type": "number"},
-        "subject_action_coverage": {"type": "number"},
-        "unsupported_claims": {
-            "type": "array",
-            "items": {"type": "string"},
-        },
-        "omissions": {
-            "type": "array",
-            "items": {"type": "string"},
-        },
-        "style_strength": {"type": "number"},
-        "naturalness": {"type": "number"},
-        "concision": {"type": "number"},
-        "overall_score": {"type": "number"},
-        "repair_instructions": {"type": "string"},
+        "selected_captions": {
+            "type": "object",
+            "properties": {
+                "formal": {"type": "string"},
+                "sarcastic": {"type": "string"},
+                "humorous_tech": {"type": "string"},
+                "humorous_non_tech": {"type": "string"},
+            }
+        }
     },
-    "required": ["best_index", "factual_accuracy", "style_strength", "overall_score"],
+    "required": ["selected_captions"]
 }
 
+# Quality check evaluation schema
 CHECK_SCHEMA = {
     "type": "object",
     "properties": {
@@ -145,30 +144,36 @@ CHECK_SCHEMA = {
 
 # Legacy schemas kept for backward compatibility in JSON repair
 OBSERVATION_SCHEMA_STR = json.dumps(EVIDENCE_LEDGER_SCHEMA, indent=2)
-CAPTION_SCHEMA_STR = json.dumps(CAPTION_SINGLE_SCHEMA, indent=2)
+CAPTION_SCHEMA_STR = json.dumps(CANDIDATE_GENERATION_SCHEMA, indent=2)
 
 # ---------------------------------------------------------------------------
-# Style caption system prompt
+# Prompts
 # ---------------------------------------------------------------------------
 
 STYLE_CAPTION_SYSTEM = (
-    "You are a single-style caption generator for a video captioning pipeline. "
-    "You receive a verified evidence ledger describing what was observed in a video. "
-    "Generate exactly one caption in the requested style. "
-    "Return strict JSON with a single key 'caption' containing one English sentence. "
-    "Figurative language may change framing but CANNOT introduce a new subject, action, "
-    "setting, object, or intention that is not in the evidence ledger."
+    "You are a single-style caption candidate generator.\n"
+    "Treat the verified evidence ledger as the sole source of truth.\n"
+    "Return JSON with key 'candidates' containing a list of English sentences.\n"
+    "Figurative language may change framing, but cannot introduce new subjects, actions, settings, objects, or intentions."
 )
 
-SELECTOR_SYSTEM = (
-    "You are a grounded caption selector. You receive an evidence ledger describing "
-    "what was observed in a video, a list of candidate captions for a specific style, "
-    "and the target style name. Score each candidate and select the best one. "
-    "Return strict JSON with scoring fields."
+SELECTOR_ALL_STYLES_SYSTEM = (
+    "You are a grounded multimodal caption selector.\n\n"
+    "You will receive:\n"
+    "1. Exactly 5 pristine keyframes from a video.\n"
+    "2. A factual evidence ledger describing what was observed in the video.\n"
+    "3. A dictionary of candidate captions generated for multiple target styles.\n\n"
+    "Your job is to look at the frames, read the evidence ledger, evaluate the candidates "
+    "for each style, and select the best caption for each style.\n\n"
+    "Rules:\n"
+    "- Only select captions that are factually accurate according to the frames and evidence. "
+    "If a candidate introduces unsupported subjects, actions, or objects, reject it.\n"
+    "- Pick the candidate that has the strongest style match (formal, sarcastic, humorous_tech, humorous_non_tech).\n"
+    "- Return strict JSON with a single key 'selected_captions' containing the chosen caption for each style."
 )
 
 # ---------------------------------------------------------------------------
-# Word sets for style detection (retained from original for quick checks)
+# Style word lists for validation checks
 # ---------------------------------------------------------------------------
 
 HUMOR_NON_TECH_WORDS = {
@@ -189,10 +194,6 @@ SARCASM_STYLE_MARKERS = {
     "apparently", "because", "clearly", "naturally", "of course",
     "obviously", "serious", "thrilling",
 }
-
-# ---------------------------------------------------------------------------
-# Empty / fallback data
-# ---------------------------------------------------------------------------
 
 EMPTY_EVIDENCE = {
     "summary": "No visual evidence was extracted.",
@@ -215,42 +216,15 @@ DRY_RUN_CAPTIONS = {
     "humorous_non_tech": "A sample subject gets things moving, and honestly, that is more than some Mondays manage.",
 }
 
-CAPTION_STYLE_ALIASES = {
-    "formal": {"formal", "professional", "objective"},
-    "sarcastic": {"sarcastic", "sarcasm", "dryhumor", "dryhumour", "ironic"},
-    "humorous_tech": {
-        "humoroustech", "humoroustechnical", "humoroustechnology",
-        "techhumor", "techhumour", "technicalhumor", "technicalhumour",
-        "technologyhumor", "technologyhumour", "funnytech", "tech",
-    },
-    "humorous_non_tech": {
-        "humorousnontech", "humorousnontechnical", "humorousnontechnology",
-        "nontechhumor", "nontechhumour", "nontechnicalhumor", "nontechnicalhumour",
-        "everydayhumor", "everydayhumour", "generalhumor", "generalhumour", "funny",
-    },
-}
-
-STYLE_LABELS = {
-    "formal": "Formal",
-    "sarcastic": "Sarcastic",
-    "humorous_tech": "Humorous-tech",
-    "humorous_non_tech": "Humorous non-tech",
-}
-
 
 class CaptionPipeline:
-    """Accuracy-first video captioning pipeline.
+    """Streamlined 3-Call Video Captioning Pipeline targeting Kimi K2.6.
 
-    Architecture:
-      1. Parallel complementary experts extract evidence from video frames,
-         crops, OCR frames, and motion clips.
-      2. Evidence is fused into a structured ledger with typed claims,
-         uncertainties, and contradictions.
-      3. Multiple candidate captions are generated per style in parallel,
-         each receiving only one target style and the verified ledger.
-      4. A grounded selector scores candidates on accuracy, coverage,
-         style strength, naturalness, and concision, then selects the best.
-      5. If the best candidate fails verification, targeted repair is applied.
+    Flow:
+      1. Deliberate 5-frame selection with perceptual hash deduplication.
+      2. Call 1 (Multimodal): Extract factual evidence ledger with frame references from 5 pristine frames.
+      3. Call 2 (Parallel): Generate 2-3 candidates per requested style in parallel.
+      4. Call 3 (Multimodal Selector): Single multimodal call evaluating candidates against the 5 pristine frames and selecting best captions.
     """
 
     def __init__(
@@ -258,14 +232,14 @@ class CaptionPipeline:
         settings: Settings,
         work_dir: Path,
         dry_run: bool = False,
-        max_frames: int = DEFAULT_MAX_FRAMES,
+        max_frames: int = 5,
         run_checks: bool = True,
         enable_style_retry: bool = True,
     ) -> None:
         self.settings = settings
         self.work_dir = work_dir
         self.dry_run = dry_run
-        self.max_frames = max_frames
+        self.max_frames = 5  # Strict cap of 5 frames
         self.run_checks = run_checks
         self.enable_style_retry = enable_style_retry
         self.client = None if dry_run else FireworksClient(
@@ -276,10 +250,6 @@ class CaptionPipeline:
             max_retries=settings.max_retries,
             request_timeout_seconds=settings.request_timeout_seconds,
         )
-
-    # ======================================================================
-    # Main entry point
-    # ======================================================================
 
     def process(
         self,
@@ -293,74 +263,87 @@ class CaptionPipeline:
     ) -> dict[str, Any]:
         started_at = time.monotonic()
         timings: dict[str, float] = {}
-        selected_styles = list(STYLE_PROMPTS)
+        requested_styles = styles if styles else list(STYLE_PROMPTS)
 
         frame_dir = self.work_dir / asset.video_id
-        should_fallback = force_fallback_captions or (
-            caption_fallback_deadline is not None
-            and time.monotonic() >= caption_fallback_deadline
-        )
+        
+        # Enforce absolute clip deadline
+        if caption_fallback_deadline is None:
+            caption_fallback_deadline = started_at + 28.0
 
-        # --- Stage 1: Frame extraction ---
+        should_fallback = force_fallback_captions or (time.monotonic() >= caption_fallback_deadline)
+
+        # --- Stage 1: Deliberate pristine frame extraction ---
         frame_started_at = time.monotonic()
         frames: list[Path] = []
-        ocr_frames: list[Path] = []
-        crop_frames: list[Path] = []
-        motion_frames: list[Path] = []
         video_duration = None if self.dry_run else probe_duration_seconds(asset.path)
 
         if not should_fallback:
+            # We strictly request 5 frames
             frames = [] if self.dry_run else extract_frames(
                 asset.path,
                 frame_dir,
-                max_frames or self.max_frames,
+                5,
                 frame_profile=frame_profile,
-            )
-            # Extract complementary evidence frames concurrently
-            ocr_frames, crop_frames, motion_frames = self._extract_complementary_frames(
-                asset, frames, frame_dir, video_duration,
             )
         timings["frame_extraction_sec"] = time.monotonic() - frame_started_at
 
-        # --- Stage 2: Evidence extraction + caption generation ---
+        # Check deadline before starting Call 1
+        remaining_time = caption_fallback_deadline - time.monotonic()
+        if remaining_time < 1.5:
+            should_fallback = True
+
+        # --- Stage 2: 3-Call Core Architecture ---
         caption_started_at = time.monotonic()
-        if should_fallback:
+        if should_fallback or not frames:
             evidence = dict(EMPTY_EVIDENCE)
             captions = {
                 style: self._fallback_caption(style, evidence)
-                for style in selected_styles
+                for style in requested_styles
             }
         else:
-            evidence = self._extract_evidence(
-                asset=asset,
-                keyframes=frames,
-                ocr_frames=ocr_frames,
-                crop_frames=crop_frames,
-                motion_frames=motion_frames,
-                video_duration=video_duration,
-            )
+            # Call 1: Multimodal Evidence Extraction
+            try:
+                evidence = self._extract_evidence(
+                    asset=asset,
+                    keyframes=frames,
+                    video_duration=video_duration,
+                    clip_deadline=caption_fallback_deadline,
+                )
+            except Exception as exc:
+                logger.error(f"Call 1 (Evidence Extraction) failed: {exc}")
+                evidence = dict(EMPTY_EVIDENCE)
+
             timings["evidence_extraction_sec"] = time.monotonic() - caption_started_at
 
-            # --- Stage 3: Parallel candidate generation + selection ---
-            gen_started_at = time.monotonic()
-            do_retry = (
-                self.enable_style_retry
-                if enable_style_retry is None
-                else enable_style_retry
-            )
-            captions = self._generate_and_select_captions(
-                evidence, selected_styles, do_retry,
-            )
-            timings["caption_generation_sec"] = time.monotonic() - gen_started_at
+            # Call 2 & 3: Parallel Candidate Generation & Multimodal Selection
+            remaining_time = caption_fallback_deadline - time.monotonic()
+            if remaining_time < 1.5:
+                captions = {
+                    style: self._fallback_caption(style, evidence)
+                    for style in requested_styles
+                }
+            else:
+                do_retry = self.enable_style_retry if enable_style_retry is None else enable_style_retry
+                captions = self._generate_and_select_captions(
+                    evidence,
+                    frames,
+                    requested_styles,
+                    do_retry,
+                    caption_fallback_deadline,
+                )
+            
+            timings["caption_generation_sec"] = time.monotonic() - (caption_started_at + timings.get("evidence_extraction_sec", 0.0))
 
         timings["total_caption_sec"] = time.monotonic() - caption_started_at
 
-        # --- Stage 4: Quality checks ---
+        # --- Stage 4: Continuous Quality checks ---
         checks = {}
-        if self.run_checks:
+        if self.run_checks and not should_fallback:
             check_started_at = time.monotonic()
-            checks = self._run_checks_concurrent(selected_styles, evidence, captions)
+            checks = self._run_checks_concurrent(requested_styles, evidence, captions)
             timings["quality_check_sec"] = time.monotonic() - check_started_at
+        
         timings["total_process_sec"] = time.monotonic() - started_at
 
         return {
@@ -368,13 +351,12 @@ class CaptionPipeline:
             "source_path": str(asset.path),
             "frames": [str(frame) for frame in frames],
             "frame_count": len(frames),
-            "ocr_frame_count": len(ocr_frames),
-            "crop_frame_count": len(crop_frames),
-            "motion_frame_count": len(motion_frames),
+            "ocr_frame_count": 0,
+            "crop_frame_count": 0,
+            "motion_frame_count": 0,
             "duration_seconds": video_duration,
-            "sampling_strategy": frames[0].parent.name if frames else "none",
+            "sampling_strategy": "deliberate_5_frame",
             "evidence": evidence,
-            # Keep 'observations' key for backward compatibility with app.py
             "observations": evidence,
             "captions": captions,
             "checks": checks,
@@ -382,173 +364,63 @@ class CaptionPipeline:
         }
 
     # ======================================================================
-    # Complementary frame extraction
-    # ======================================================================
-
-    def _extract_complementary_frames(
-        self,
-        asset: VideoAsset,
-        keyframes: list[Path],
-        frame_dir: Path,
-        video_duration: float | None,
-    ) -> tuple[list[Path], list[Path], list[Path]]:
-        """Extract OCR, crop, and motion frames concurrently."""
-        if self.dry_run or not keyframes:
-            return [], [], []
-
-        ocr_frames: list[Path] = []
-        crop_frames: list[Path] = []
-        motion_frames: list[Path] = []
-
-        try:
-            from track2_captioner.video_ingest import (
-                extract_crop_frames,
-                extract_ocr_frames,
-                extract_motion_clip_frames,
-            )
-        except ImportError:
-            logger.warning("Complementary extraction functions not available.")
-            return [], [], []
-
-        futures: dict[str, Future] = {}
-        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="complementary") as pool:
-            if getattr(self.settings, "ocr_enabled", True):
-                futures["ocr"] = pool.submit(
-                    extract_ocr_frames,
-                    asset.path,
-                    frame_dir / "ocr",
-                    3,
-                    1280,
-                )
-            if getattr(self.settings, "crop_enabled", True) and keyframes:
-                futures["crop"] = pool.submit(
-                    extract_crop_frames,
-                    keyframes,
-                    frame_dir / "crops",
-                )
-            if getattr(self.settings, "motion_clip_enabled", True):
-                futures["motion"] = pool.submit(
-                    extract_motion_clip_frames,
-                    asset.path,
-                    frame_dir / "motion",
-                    2,
-                    3.0,
-                )
-
-            for name, future in futures.items():
-                try:
-                    result = future.result(timeout=8.0)
-                    if name == "ocr":
-                        ocr_frames = result
-                    elif name == "crop":
-                        crop_frames = result
-                    elif name == "motion":
-                        motion_frames = result
-                except Exception:
-                    logger.warning("Complementary extraction '%s' failed.", name, exc_info=True)
-
-        return ocr_frames, crop_frames, motion_frames
-
-    # ======================================================================
-    # Evidence extraction (parallel experts)
+    # Call 1: Multimodal Evidence Extraction
     # ======================================================================
 
     def _extract_evidence(
         self,
         asset: VideoAsset,
         keyframes: list[Path],
-        ocr_frames: list[Path],
-        crop_frames: list[Path],
-        motion_frames: list[Path],
         video_duration: float | None,
+        clip_deadline: float,
     ) -> dict[str, Any]:
-        """Run parallel perception experts and fuse into a single evidence ledger."""
-        if self.dry_run:
-            return dict(EMPTY_EVIDENCE)
+        """Extract a structured evidence ledger with frame references from 5 pristine frames."""
         assert self.client is not None
 
-        # Run perception experts concurrently
-        expert_results: dict[str, dict[str, Any]] = {}
-        deadline = getattr(self.settings, "stage_deadline_perception", 12.0)
-
-        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="perception") as pool:
-            futures: dict[str, Future] = {}
-
-            # Expert 1: Keyframe perception (primary)
-            if keyframes:
-                futures["keyframes"] = pool.submit(
-                    self._perception_expert_call,
-                    keyframes,
-                    video_duration,
-                    "keyframes",
-                )
-
-            # Expert 2: OCR perception on high-res unmodified frames
-            if ocr_frames:
-                futures["ocr"] = pool.submit(
-                    self._perception_expert_call,
-                    ocr_frames,
-                    video_duration,
-                    "ocr",
-                )
-
-            # Expert 3: Crop perception for fine detail
-            if crop_frames:
-                futures["crops"] = pool.submit(
-                    self._perception_expert_call,
-                    crop_frames[:3],  # Limit to 3 crops to stay within token budget
-                    video_duration,
-                    "crops",
-                )
-
-            for name, future in futures.items():
-                try:
-                    result = future.result(timeout=deadline)
-                    expert_results[name] = result
-                except Exception:
-                    logger.warning("Perception expert '%s' failed.", name, exc_info=True)
-
-        if not expert_results:
-            return dict(EMPTY_EVIDENCE)
-
-        # Fuse evidence from all experts
-        return self._fuse_evidence(expert_results)
-
-    def _perception_expert_call(
-        self,
-        frames: list[Path],
-        video_duration: float | None,
-        source_name: str,
-    ) -> dict[str, Any]:
-        """Call the perception model on a set of frames."""
-        assert self.client is not None
+        # Compile motion/native-video metadata locally
+        motion_metadata = {
+            "allocation_strategy": "Deliberate 5-Frame Allocation (beginning, strongest_scene_change, middle, strongest_action, end)",
+            "timeline_events": [
+                {"frame_index": 1, "type": "Beginning Timeline Anchor", "description": "Establishes baseline setting and initial state."},
+                {"frame_index": 2, "type": "Strongest Scene Change Spike", "description": "Highest frame difference / transition index in video."},
+                {"frame_index": 3, "type": "Middle Timeline Anchor", "description": "Tracks progression / mid-point state of action."},
+                {"frame_index": 4, "type": "Strongest Action/Detail Peak", "description": "Highest motion delta / visual detail frame."},
+                {"frame_index": 5, "type": "End Timeline Anchor", "description": "Tracks final state and resolution of action."}
+            ]
+        }
 
         content: list[dict[str, Any]] = []
         frame_timestamps = []
-        for index, frame in enumerate(frames):
-            timestamp = self._frame_timestamp(frame, index, len(frames), video_duration)
+        for index, frame in enumerate(keyframes):
+            timestamp = self._frame_timestamp(frame, index, len(keyframes), video_duration)
             frame_timestamps.append(round(timestamp, 3))
 
+        # Direct video url grounding support
+        is_native_video = any(x in self.settings.model.lower() for x in ["omni", "video", "gemini"])
+
         request = {
-            "source": source_name,
-            "task": "Extract factual visual evidence from these frames. "
-                    "Report observations with confidence levels and timestamp references.",
-            "frame_count": len(frames),
+            "task": "Extract a structured evidence ledger from these 5 frames. Group observations with explicit frame references (e.g. Frame 1, Frame 3).",
             "video_duration_seconds": round(video_duration, 3) if video_duration else None,
             "frame_timestamps_seconds": frame_timestamps,
+            "motion_timeline_evidence": motion_metadata,
+            "native_video_grounding_url": str(asset.path) if is_native_video else None,
         }
         content.append({"type": "text", "text": json.dumps(request, indent=2)})
 
-        for index, frame in enumerate(frames):
+        for index, frame in enumerate(keyframes):
             ts = frame_timestamps[index]
             content.append({
                 "type": "text",
-                "text": f"Frame {index + 1}/{len(frames)} at {self._format_timestamp(ts)}.",
+                "text": f"Frame {index + 1}/5 at {self._format_timestamp(ts)}.",
             })
             content.append({
                 "type": "image_url",
                 "image_url": {"url": image_to_data_url(frame)},
             })
+
+        remaining_time = clip_deadline - time.monotonic()
+        timeout = min(remaining_time - 2.0, getattr(self.settings, "stage_deadline_perception", 12.0))
+        timeout = max(1.0, timeout)
 
         response = self.client.chat(
             self.settings.model,
@@ -559,265 +431,148 @@ class CaptionPipeline:
             max_tokens=self.settings.max_tokens,
             temperature=self.settings.temperature,
             reasoning_effort=self.settings.reasoning_effort,
-            json_mode=True,
+            json_schema=EVIDENCE_LEDGER_SCHEMA,
         )
-        parsed = self._parse_or_repair_json(response, f"evidence from {source_name}")
-        # Tag claims with their source
-        for claim in parsed.get("claims", []):
-            if isinstance(claim, dict):
-                claim.setdefault("source", source_name)
+        
+        parsed = self._parse_or_repair_json(response, "evidence ledger", EVIDENCE_LEDGER_SCHEMA)
+        
+        # Semantic consensus & threshold check: filter low-confidence claims
+        if "claims" in parsed and isinstance(parsed["claims"], list):
+            valid_claims = []
+            for claim in parsed["claims"]:
+                if not isinstance(claim, dict):
+                    continue
+                conf = claim.get("confidence", 1.0)
+                # Filter out low-confidence unsupported claims
+                if conf >= 0.70:
+                    valid_claims.append(claim)
+            parsed["claims"] = valid_claims
+
         return parsed
 
-    def _fuse_evidence(
-        self, expert_results: dict[str, dict[str, Any]],
-    ) -> dict[str, Any]:
-        """Fuse observations from multiple experts into a single evidence ledger.
-
-        Only consensus or directly supported facts are preserved. Contradictions
-        are flagged. Claims from each expert carry their source tag.
-        """
-        fused: dict[str, Any] = {
-            "summary": "",
-            "setting": "",
-            "subjects": [],
-            "subject_counts": {},
-            "objects": [],
-            "actions": [],
-            "ocr": [],
-            "camera_motion": "unknown",
-            "claims": [],
-            "uncertainties": [],
-            "contradictions": [],
-        }
-
-        seen_subjects: set[str] = set()
-        seen_objects: set[str] = set()
-        seen_actions: set[str] = set()
-        seen_ocr: set[str] = set()
-        all_claims: list[dict[str, Any]] = []
-
-        for source_name, result in expert_results.items():
-            if not isinstance(result, dict):
-                continue
-
-            # Take the longest/most detailed summary
-            summary = str(result.get("summary", "")).strip()
-            if len(summary) > len(fused["summary"]):
-                fused["summary"] = summary
-
-            # Take the most specific setting
-            setting = str(result.get("setting", "")).strip()
-            if len(setting) > len(fused["setting"]):
-                fused["setting"] = setting
-
-            # Merge subjects
-            for subject in self._string_list_from_keys(result, ["subjects"]):
-                normalized = subject.lower().strip()
-                if normalized not in seen_subjects:
-                    seen_subjects.add(normalized)
-                    fused["subjects"].append(subject)
-
-            # Merge subject counts
-            counts = result.get("subject_counts", {})
-            if isinstance(counts, dict):
-                for key, value in counts.items():
-                    fused["subject_counts"].setdefault(key, value)
-
-            # Merge objects
-            for obj in self._string_list_from_keys(result, ["objects", "key_objects"]):
-                normalized = obj.lower().strip()
-                if normalized not in seen_objects:
-                    seen_objects.add(normalized)
-                    fused["objects"].append(obj)
-
-            # Merge actions
-            for action in self._string_list_from_keys(result, ["actions"]):
-                normalized = action.lower().strip()
-                if normalized not in seen_actions:
-                    seen_actions.add(normalized)
-                    fused["actions"].append(action)
-
-            # Merge OCR (treated as untrusted data)
-            for text in self._string_list_from_keys(result, ["ocr", "visible_text"]):
-                normalized = text.strip()
-                if normalized and normalized not in seen_ocr:
-                    seen_ocr.add(normalized)
-                    fused["ocr"].append(text)
-
-            # Camera motion
-            cam = str(result.get("camera_motion", "")).strip()
-            if cam and cam != "unknown" and fused["camera_motion"] == "unknown":
-                fused["camera_motion"] = cam
-
-            # Collect all claims
-            for claim in result.get("claims", []):
-                if isinstance(claim, dict):
-                    claim.setdefault("source", source_name)
-                    all_claims.append(claim)
-
-            # Uncertainties
-            for unc in self._string_list_from_keys(result, ["uncertainties"]):
-                if unc not in fused["uncertainties"]:
-                    fused["uncertainties"].append(unc)
-
-            # Contradictions
-            for con in self._string_list_from_keys(result, ["contradictions"]):
-                if con not in fused["contradictions"]:
-                    fused["contradictions"].append(con)
-
-        # Deduplicate claims by text, keeping highest confidence
-        claim_map: dict[str, dict[str, Any]] = {}
-        for claim in all_claims:
-            text = claim.get("text", "").strip().lower()
-            if not text:
-                continue
-            existing = claim_map.get(text)
-            if existing is None or claim.get("confidence", 0) > existing.get("confidence", 0):
-                claim_map[text] = claim
-                # Track multi-source support
-                if existing and existing.get("source") != claim.get("source"):
-                    sources = set()
-                    for s in [existing.get("source", ""), claim.get("source", "")]:
-                        if s:
-                            sources.add(s)
-                    claim["sources"] = sorted(sources)
-
-        fused["claims"] = list(claim_map.values())
-
-        # Detect contradictions between claims
-        self._detect_contradictions(fused)
-
-        if not fused["summary"]:
-            fused["summary"] = "Visual evidence extracted from video frames."
-
-        return fused
-
-    def _detect_contradictions(self, evidence: dict[str, Any]) -> None:
-        """Simple contradiction detection: flag claims about the same type with low confidence."""
-        claims = evidence.get("claims", [])
-        type_groups: dict[str, list[dict]] = {}
-        for claim in claims:
-            claim_type = claim.get("type", "general")
-            type_groups.setdefault(claim_type, []).append(claim)
-
-        for claim_type, group in type_groups.items():
-            if len(group) > 1:
-                confidences = [c.get("confidence", 0.5) for c in group]
-                if min(confidences) < 0.5 and max(confidences) > 0.7:
-                    low_conf = [c for c in group if c.get("confidence", 0.5) < 0.5]
-                    for c in low_conf:
-                        contradiction = f"Low-confidence {claim_type} claim: {c.get('text', '')}"
-                        if contradiction not in evidence["contradictions"]:
-                            evidence["contradictions"].append(contradiction)
-
     # ======================================================================
-    # Parallel candidate generation
+    # Call 2 & 3: Parallel Candidate Generation & Multimodal Selection
     # ======================================================================
 
     def _generate_and_select_captions(
         self,
         evidence: dict[str, Any],
+        keyframes: list[Path],
         styles: list[str],
         enable_retry: bool,
+        clip_deadline: float,
     ) -> dict[str, str]:
-        """Generate multiple candidates per style in parallel, then select the best."""
         if self.dry_run:
             return {style: DRY_RUN_CAPTIONS.get(style, "") for style in styles}
-
         assert self.client is not None
-        candidate_count = getattr(self.settings, "candidate_count", 4)
 
-        # Generate candidates for all styles concurrently
-        # Each style gets candidate_count independent calls
+        remaining_time = clip_deadline - time.monotonic()
+        
+        # Adaptive candidate count scaling based on remaining time
+        if remaining_time > 15.0:
+            num_candidates = 3
+        elif remaining_time >= 8.0:
+            num_candidates = 2
+        else:
+            num_candidates = 1  # Low latency mode: skip selector entirely
+
+        # Call 2: Generate candidates concurrently
         style_candidates: dict[str, list[str]] = {style: [] for style in styles}
-        futures: dict[Future, tuple[str, int]] = {}
+        futures: dict[Future, str] = {}
 
-        max_workers = min(len(styles) * candidate_count, 8)
+        max_workers = min(len(styles), 4)
         with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="candidates") as pool:
             for style in styles:
-                for i in range(candidate_count):
-                    # Vary temperature for diversity
-                    temp = self._candidate_temperature(style, i, candidate_count)
-                    future = pool.submit(
-                        self._generate_single_candidate,
-                        evidence, style, temp,
-                    )
-                    futures[future] = (style, i)
-
-            deadline = getattr(self.settings, "stage_deadline_candidates", 10.0)
-            for future in as_completed(futures, timeout=deadline + 2):
-                style, index = futures[future]
-                try:
-                    caption = future.result(timeout=2.0)
-                    if caption:
-                        style_candidates[style].append(caption)
-                except Exception:
-                    logger.warning("Candidate %d for style '%s' failed.", index, style, exc_info=True)
-
-        # Select best candidate per style
-        captions: dict[str, str] = {}
-        for style in styles:
-            candidates = style_candidates[style]
-            if not candidates:
-                captions[style] = self._fallback_caption(style, evidence)
-                continue
-
-            if len(candidates) == 1:
-                captions[style] = self._clean_caption(candidates[0])
-            else:
-                captions[style] = self._select_best_candidate(
-                    evidence, style, candidates,
+                future = pool.submit(
+                    self._generate_candidates_for_style,
+                    evidence, style, num_candidates,
                 )
+                futures[future] = style
 
-        # Ensure all styles have captions
+            try:
+                cand_timeout = min(remaining_time - 3.0, getattr(self.settings, "stage_deadline_candidates", 10.0))
+                cand_timeout = max(1.0, cand_timeout)
+                for future in as_completed(futures, timeout=cand_timeout):
+                    style = futures[future]
+                    try:
+                        candidates = future.result()
+                        if candidates:
+                            style_candidates[style] = candidates
+                    except Exception as e:
+                        logger.error(f"Candidate generation failed for {style}: {e}")
+            except TimeoutError:
+                # Cancel pending futures immediately on timeout
+                for f in futures:
+                    f.cancel()
+                logger.warning("Candidate generation timed out; cancelling pending tasks.")
+
+        # Enforce fallbacks for missing candidates
+        for style in styles:
+            if not style_candidates[style]:
+                style_candidates[style] = [self._fallback_caption(style, evidence)]
+
+        # Call 3: Grounded Multimodal Selector
+        remaining_time = clip_deadline - time.monotonic()
+        if num_candidates == 1 or remaining_time < 3.0:
+            # Skip selector if only 1 candidate or low on time
+            captions = {style: candidates[0] for style, candidates in style_candidates.items()}
+        else:
+            try:
+                captions = self._select_best_candidates_multimodal(
+                    evidence, keyframes, style_candidates, remaining_time,
+                )
+            except Exception as e:
+                logger.error(f"Call 3 (Multimodal Selector) failed: {e}")
+                # Fallback to the first candidate of each style
+                captions = {style: candidates[0] for style, candidates in style_candidates.items()}
+
+        # Clean/sanitize output captions
         captions = self._sanitize_caption_map(styles, captions, evidence)
 
-        # Optional repair pass
-        if enable_retry:
+        # Style-specific repair pass if verified style rules fail
+        if enable_retry and (clip_deadline - time.monotonic() > 2.0):
             issues = self._caption_issues(styles, captions)
             if issues:
                 captions = self._repair_captions(evidence, styles, captions, issues)
 
         return captions
 
-    def _candidate_temperature(
-        self, style: str, index: int, total: int,
-    ) -> float:
-        """Compute temperature for a candidate to ensure diversity.
-
-        Formal style uses lower temperature; humor styles explore more broadly.
-        """
-        base = self.settings.temperature if style == "formal" else self.settings.creative_temperature
-        if total <= 1:
-            return base
-        # Spread temperatures across range for diversity
-        spread = 0.15
-        offset = (index / (total - 1)) * spread - (spread / 2)
-        return max(0.1, min(1.0, base + offset))
-
-    def _generate_single_candidate(
+    def _generate_candidates_for_style(
         self,
         evidence: dict[str, Any],
         style: str,
-        temperature: float,
-    ) -> str:
-        """Generate a single caption candidate for one style."""
+        num_candidates: int,
+    ) -> list[str]:
+        """Call 2: Generate 2-3 candidates for one style in a single schema-constrained call."""
         assert self.client is not None
 
         style_instruction = load_prompt(STYLE_PROMPTS[style]) if style in STYLE_PROMPTS else ""
+        
         request = {
             "target_style": style,
             "evidence_ledger": evidence,
             "style_instructions": style_instruction,
             "rules": [
                 "Use ONLY facts from the evidence ledger. Do not add unsupported details.",
-                "Generate exactly one caption in the target style.",
-                "The caption must be one concise English sentence, ideally 12 to 30 words.",
-                "Figurative language may change framing but CANNOT introduce a new subject, "
-                "action, setting, object, or intention not in the evidence.",
-                "Never mention observations, prompts, models, frames, timestamps, or analysis mechanics.",
-                "Return JSON with key 'caption'.",
-            ],
+                f"Generate exactly {num_candidates} distinct candidate captions in the target style.",
+                "Each caption must be one concise English sentence, ideally 12 to 30 words.",
+                "Figurative language may change framing but CANNOT introduce new subjects or actions.",
+                "Return JSON with key 'candidates' containing the list of captions.",
+            ]
+        }
+
+        # Schema to return exactly num_candidates items
+        schema = {
+            "type": "object",
+            "properties": {
+                "candidates": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": num_candidates,
+                    "maxItems": num_candidates
+                }
+            },
+            "required": ["candidates"]
         }
 
         response = self.client.chat(
@@ -827,148 +582,71 @@ class CaptionPipeline:
                 {"role": "user", "content": json.dumps(request, indent=2)},
             ],
             max_tokens=self.settings.caption_max_tokens,
-            temperature=temperature,
-            reasoning_effort=self.settings.reasoning_effort,
-            json_mode=True,
+            temperature=self.settings.creative_temperature if style != "formal" else 0.1,
+            json_schema=schema,
         )
         parsed = parse_json_object(response)
-        return str(parsed.get("caption", "")).strip()
-
-    def _select_best_candidate(
-        self,
-        evidence: dict[str, Any],
-        style: str,
-        candidates: list[str],
-    ) -> str:
-        """Use the selector model to score candidates and pick the best."""
-        assert self.client is not None
-
-        selector_model = getattr(self.settings, "selector_model", "") or self.settings.caption_model
-        request = {
-            "task": "Score each candidate caption and select the best one.",
-            "target_style": style,
-            "evidence_ledger": evidence,
-            "candidates": [
-                {"index": i, "caption": c} for i, c in enumerate(candidates)
-            ],
-            "scoring_criteria": [
-                "factual_accuracy: Does the caption only contain facts from the evidence? (0.0-1.0)",
-                "subject_action_coverage: Does it mention the main subjects and actions? (0.0-1.0)",
-                "style_strength: Does it match the target style convincingly? (0.0-1.0)",
-                "naturalness: Does it read naturally as a caption? (0.0-1.0)",
-                "concision: Is it appropriately concise? (0.0-1.0)",
-            ],
-            "instructions": [
-                "Return the index of the best candidate in 'best_index'.",
-                "List any unsupported claims or omissions.",
-                "If the best candidate needs repair, provide repair_instructions.",
-            ],
-        }
-
-        try:
-            response = self.client.chat(
-                selector_model,
-                [
-                    {"role": "system", "content": SELECTOR_SYSTEM},
-                    {"role": "user", "content": json.dumps(request, indent=2)},
-                ],
-                max_tokens=self.settings.caption_max_tokens,
-                temperature=0.1,
-                reasoning_effort=self.settings.reasoning_effort,
-                json_mode=True,
-            )
-            parsed = parse_json_object(response)
-            best_index = int(parsed.get("best_index", 0))
-            best_index = max(0, min(best_index, len(candidates) - 1))
-            selected = self._clean_caption(candidates[best_index])
-
-            # If repair is needed and instructions given, apply repair
-            repair = str(parsed.get("repair_instructions", "")).strip()
-            if repair and repair.lower() not in ("none", "n/a", ""):
-                repaired = self._repair_single_caption(
-                    evidence, style, selected, repair,
-                )
-                if repaired:
-                    selected = repaired
-
-            return selected
-        except Exception:
-            logger.warning("Selector failed for style '%s'; using first candidate.", style, exc_info=True)
-            return self._clean_caption(candidates[0])
-
-    def _repair_single_caption(
-        self,
-        evidence: dict[str, Any],
-        style: str,
-        caption: str,
-        repair_instructions: str,
-    ) -> str:
-        """Apply targeted repair to a single caption."""
-        assert self.client is not None
-
-        request = {
-            "task": "Repair this caption following the repair instructions.",
-            "target_style": style,
-            "evidence_ledger": evidence,
-            "current_caption": caption,
-            "repair_instructions": repair_instructions,
-            "rules": [
-                "Keep all accurate facts from the current caption.",
-                "Fix only what the repair instructions specify.",
-                "Use ONLY facts from the evidence ledger.",
-                "Return JSON with key 'caption'.",
-            ],
-        }
-
-        try:
-            response = self.client.chat(
-                self.settings.caption_model,
-                [
-                    {"role": "system", "content": STYLE_CAPTION_SYSTEM},
-                    {"role": "user", "content": json.dumps(request, indent=2)},
-                ],
-                max_tokens=self.settings.caption_max_tokens,
-                temperature=0.15,
-                reasoning_effort=self.settings.reasoning_effort,
-                json_mode=True,
-            )
-            parsed = parse_json_object(response)
-            repaired = str(parsed.get("caption", "")).strip()
-            return self._clean_caption(repaired) if repaired else ""
-        except Exception:
-            logger.warning("Repair failed for style '%s'.", style, exc_info=True)
-            return ""
-
-    def _repair_captions(
-        self,
-        evidence: dict[str, Any],
-        styles: list[str],
-        current_captions: dict[str, str],
-        issues: list[str],
-    ) -> dict[str, str]:
-        """Repair captions that have style or length issues."""
-        # Identify which styles need repair
-        styles_to_repair = set()
-        for issue in issues:
-            style = issue.split(":")[0].strip()
-            if style in current_captions:
-                styles_to_repair.add(style)
-
-        repaired = dict(current_captions)
-        for style in styles_to_repair:
-            repair_instruction = "; ".join(
-                i.split(":", 1)[1].strip() for i in issues if i.startswith(style)
-            )
-            result = self._repair_single_caption(
-                evidence, style, current_captions[style], repair_instruction,
-            )
-            if result:
-                repaired[style] = result
-
-        return self._sanitize_caption_map(styles, repaired, evidence)
+        return parsed.get("candidates", [])
 
     # ======================================================================
-    # Quality checks
+    # Call 3: Grounded Multimodal Selector
+    # ======================================================================
+
+    def _select_best_candidates_multimodal(
+        self,
+        evidence: dict[str, Any],
+        keyframes: list[Path],
+        style_candidates: dict[str, list[str]],
+        remaining_time: float,
+    ) -> dict[str, str]:
+        """Call 3: Multimodal selector evaluates all candidate styles against the 5 pristine frames in a single call."""
+        assert self.client is not None
+
+        content: list[dict[str, Any]] = []
+        request = {
+            "task": "Evaluate candidate captions against the visual evidence and select the best one for each style.",
+            "evidence_ledger": evidence,
+            "candidates_by_style": style_candidates,
+        }
+        content.append({"type": "text", "text": json.dumps(request, indent=2)})
+
+        for index, frame in enumerate(keyframes):
+            content.append({
+                "type": "text",
+                "text": f"Pristine Frame {index + 1}/5.",
+            })
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": image_to_data_url(frame)},
+            })
+
+        selector_model = getattr(self.settings, "selector_model", "") or self.settings.caption_model
+        timeout = min(remaining_time - 1.5, getattr(self.settings, "stage_deadline_selection", 6.0))
+        timeout = max(1.0, timeout)
+
+        response = self.client.chat(
+            selector_model,
+            [
+                {"role": "system", "content": SELECTOR_ALL_STYLES_SYSTEM},
+                {"role": "user", "content": content},
+            ],
+            max_tokens=self.settings.caption_max_tokens,
+            temperature=0.1,
+            json_schema=SELECTOR_ALL_STYLES_SCHEMA,
+        )
+        
+        parsed = parse_json_object(response)
+        selected = parsed.get("selected_captions", {})
+        
+        # In case the selector fails to pick all requested styles
+        for style in style_candidates:
+            if style not in selected:
+                selected[style] = style_candidates[style][0]
+                
+        return selected
+
+    # ======================================================================
+    # Quality checks & Repairs
     # ======================================================================
 
     def _check(self, style: str, evidence: dict[str, Any], caption: str) -> dict[str, Any]:
@@ -1004,7 +682,7 @@ class CaptionPipeline:
                 max_tokens=self.settings.check_max_tokens,
                 temperature=self.settings.temperature,
                 reasoning_effort=self.settings.reasoning_effort,
-                json_mode=True,
+                json_schema=CHECK_SCHEMA,
             )
             parsed = parse_json_object(response)
 
@@ -1023,8 +701,8 @@ class CaptionPipeline:
                 "overall_score": overall,
                 "repair_instructions": str(parsed.get("repair_instructions", "")),
                 # Backward compatibility
-                "accuracy": "pass" if factual >= 0.6 else "fail",
-                "tone": "pass" if style_score >= 0.6 else "fail",
+                "accuracy": "pass" if factual >= 0.7 else "fail",
+                "tone": "pass" if style_score >= 0.7 else "fail",
                 "notes": str(parsed.get("repair_instructions", "")),
             }
         except Exception as exc:
@@ -1072,6 +750,65 @@ class CaptionPipeline:
                     }
         return checks
 
+    def _repair_captions(
+        self,
+        evidence: dict[str, Any],
+        styles: list[str],
+        current_captions: dict[str, str],
+        issues: list[str],
+    ) -> dict[str, str]:
+        """Repair captions that fail rules or style checks."""
+        repaired = dict(current_captions)
+        for issue in issues:
+            parts = issue.split(":", 1)
+            style = parts[0].strip()
+            instruction = parts[1].strip() if len(parts) > 1 else "make caption correct and style strong"
+            if style in current_captions:
+                result = self._repair_single_caption(evidence, style, current_captions[style], instruction)
+                if result:
+                    repaired[style] = result
+        return self._sanitize_caption_map(styles, repaired, evidence)
+
+    def _repair_single_caption(
+        self,
+        evidence: dict[str, Any],
+        style: str,
+        caption: str,
+        repair_instructions: str,
+    ) -> str:
+        """Call style model to repair a single caption with rules enforcement."""
+        assert self.client is not None
+        request = {
+            "task": "Repair this caption following the repair instructions.",
+            "target_style": style,
+            "evidence_ledger": evidence,
+            "current_caption": caption,
+            "repair_instructions": repair_instructions,
+            "rules": [
+                "Keep all accurate facts from the current caption.",
+                "Fix only what the repair instructions specify.",
+                "Use ONLY facts from the evidence ledger.",
+                "Return JSON with key 'caption'.",
+            ],
+        }
+
+        try:
+            response = self.client.chat(
+                self.settings.caption_model,
+                [
+                    {"role": "system", "content": STYLE_CAPTION_SYSTEM},
+                    {"role": "user", "content": json.dumps(request, indent=2)},
+                ],
+                max_tokens=self.settings.caption_max_tokens,
+                temperature=0.15,
+                json_schema={"type": "object", "properties": {"caption": {"type": "string"}}, "required": ["caption"]},
+            )
+            parsed = parse_json_object(response)
+            repaired = str(parsed.get("caption", "")).strip()
+            return self._clean_caption(repaired) if repaired else ""
+        except Exception:
+            return ""
+
     # ======================================================================
     # Utilities
     # ======================================================================
@@ -1108,23 +845,6 @@ class CaptionPipeline:
         cleaned = re.sub(r"\s+", " ", cleaned)
         cleaned = re.sub(r"\s+([,.!?])", r"\1", cleaned)
         return cleaned
-
-    @staticmethod
-    def _normalize_caption_key(key: str) -> str:
-        return re.sub(r"[^a-z0-9]+", "", key.lower())
-
-    @staticmethod
-    def _string_list_from_keys(payload: dict[str, Any], keys: list[str]) -> list[str]:
-        for key in keys:
-            value = payload.get(key)
-            if value:
-                if isinstance(value, list):
-                    return [str(item).strip() for item in value if str(item).strip()]
-                if isinstance(value, str):
-                    cleaned = value.strip()
-                    if cleaned:
-                        return [cleaned]
-        return []
 
     @staticmethod
     def _caption_issues(styles: list[str], captions: dict[str, str]) -> list[str]:
@@ -1198,7 +918,7 @@ class CaptionPipeline:
                 return {}
             schema_hint = ""
             if expected_schema:
-                schema_hint = f"\n\nExpected JSON schema:\n{expected_schema}"
+                schema_hint = f"\n\nExpected JSON schema:\n{json.dumps(expected_schema, indent=2)}"
             repaired = self.client.chat(
                 self.settings.model,
                 [

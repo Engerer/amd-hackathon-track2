@@ -368,34 +368,61 @@ def _select_adaptive_candidates(
     duration: float,
     final_count: int,
 ) -> list[FrameCandidate]:
-    """Keep broad timeline coverage, then fill remaining slots with sharp salient frames."""
-    selected: dict[float, FrameCandidate] = {}
-    anchor_count = max(3, min(final_count, math.ceil(final_count * (2 / 3))))
-    for timestamp in _sample_timestamps(duration, anchor_count):
-        _add_candidate_once(selected, _closest_candidate(candidates, timestamp))
+    """Select 5 frames with deliberate allocation (beginning, end, middle, scene change, detail) and enforce visual diversity via perceptual hash deduplication."""
+    final_count = min(final_count, 5)
+    if not candidates:
+        return []
 
-    min_gap = max(duration / max(final_count * 3.0, 1), 0.5)
-    for candidate in sorted(candidates, key=lambda item: item.score, reverse=True):
-        if len(selected) >= final_count:
+    selected: list[FrameCandidate] = []
+
+    def is_duplicate(cand: FrameCandidate) -> bool:
+        for s in selected:
+            if _hamming_distance(cand.hash_value, s.hash_value) < 8:
+                return True
+        return False
+
+    # 1. Beginning candidate: closest to 0.05 * duration
+    beg_target = 0.05 * duration
+    for c in sorted(candidates, key=lambda c: abs(c.timestamp - beg_target)):
+        if not is_duplicate(c):
+            selected.append(c)
             break
-        too_close = any(abs(candidate.timestamp - kept.timestamp) < min_gap for kept in selected.values())
-        if not too_close:
-            selected[candidate.timestamp] = candidate
 
+    # 2. End candidate: closest to 0.95 * duration
+    end_target = 0.95 * duration
+    for c in sorted(candidates, key=lambda c: abs(c.timestamp - end_target)):
+        if not is_duplicate(c):
+            selected.append(c)
+            break
+
+    # 3. Middle candidate: closest to 0.50 * duration
+    mid_target = 0.50 * duration
+    for c in sorted(candidates, key=lambda c: abs(c.timestamp - mid_target)):
+        if not is_duplicate(c):
+            selected.append(c)
+            break
+
+    # 4. Strongest scene change: highest motion
+    for c in sorted(candidates, key=lambda c: c.motion, reverse=True):
+        if c not in selected and not is_duplicate(c):
+            selected.append(c)
+            break
+
+    # 5. Strongest action/detail: highest score
+    for c in sorted(candidates, key=lambda c: c.score, reverse=True):
+        if c not in selected and not is_duplicate(c):
+            selected.append(c)
+            break
+
+    # Fallback to timeline anchors if still lacking frames due to strict deduplication
     if len(selected) < final_count:
-        for timestamp in _sample_timestamps(duration, final_count):
+        for c in sorted(candidates, key=lambda c: c.score, reverse=True):
             if len(selected) >= final_count:
                 break
-            candidate = _closest_candidate(candidates, timestamp)
-            _add_candidate_once(selected, candidate)
+            if c not in selected:
+                selected.append(c)
 
-    if len(selected) < final_count:
-        for candidate in sorted(candidates, key=lambda item: item.score, reverse=True):
-            if len(selected) >= final_count:
-                break
-            selected.setdefault(candidate.timestamp, candidate)
-
-    return sorted(selected.values(), key=lambda candidate: candidate.timestamp)[:final_count]
+    return sorted(selected, key=lambda c: c.timestamp)[:final_count]
 
 
 def _extract_adaptive_frames_opencv(
