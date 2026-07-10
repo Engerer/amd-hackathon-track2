@@ -123,7 +123,7 @@ def choose_task_frame_budget(
 ) -> int:
     cap = max(1, max_frames)
     if task_count >= 10:
-        cap = min(cap, 12)
+        cap = min(cap, 15)
 
     remaining_tasks = max(1, task_count - completed_count)
     remaining_seconds = max(0.0, hard_deadline_seconds - elapsed_seconds)

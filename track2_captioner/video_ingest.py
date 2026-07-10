@@ -17,7 +17,7 @@ MIN_VIDEO_DURATION_SECONDS = 30.0
 MAX_VIDEO_DURATION_SECONDS = 240.0
 DURATION_TOLERANCE_SECONDS = 0.5
 ABSOLUTE_MAX_FRAMES = 20
-DEFAULT_MAX_FRAMES = 5
+DEFAULT_MAX_FRAMES = 15
 DEFAULT_FRAME_PROFILE = "fast"
 FAST_FRAME_PROFILES = {"fast", "storyboard"}
 
@@ -247,9 +247,7 @@ def compute_dynamic_frame_count(
         return cap
     profile = (frame_profile or DEFAULT_FRAME_PROFILE).lower()
     if profile in FAST_FRAME_PROFILES:
-        if duration_seconds <= 60:
-            return min(8, cap)
-        return min(12, cap)
+        return min(15, cap)
     if profile != "balanced":
         return cap
     if duration_seconds <= 45:
