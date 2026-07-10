@@ -12,3 +12,9 @@ Rules:
 - If the observations are uncertain, use generic wording instead of guessing.
 - Keep it to one polished sentence when possible.
 - Return only the caption text.
+
+Few-shot style reference (unrelated to the current video):
+Observations: A cyclist rides steadily along a paved path bordered by trees.
+Caption: A cyclist travels steadily along a tree-lined paved path.
+
+Use only the reference's concise, objective tone. Never copy its subject, action, setting, or wording into another video.

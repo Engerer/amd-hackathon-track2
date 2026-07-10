@@ -31,7 +31,6 @@ class VideoDurationError(ValueError):
 class VideoAsset:
     video_id: str
     path: Path
-    transcript_path: Path | None
 
 
 @dataclass(frozen=True)
@@ -44,22 +43,14 @@ class FrameCandidate:
     hash_value: int
 
 
-def discover_videos(input_dir: Path, transcript_dir: Path | None = None) -> list[VideoAsset]:
+def discover_videos(input_dir: Path) -> list[VideoAsset]:
     if not input_dir.exists():
         return []
 
-    transcript_dir = transcript_dir or input_dir.parent / "transcripts"
     assets: list[VideoAsset] = []
     for path in sorted(input_dir.iterdir()):
         if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS:
-            transcript_path = transcript_dir / f"{path.stem}.txt"
-            assets.append(
-                VideoAsset(
-                    video_id=path.stem,
-                    path=path,
-                    transcript_path=transcript_path if transcript_path.exists() else None,
-                )
-            )
+            assets.append(VideoAsset(video_id=path.stem, path=path))
     return assets
 
 
@@ -525,7 +516,7 @@ def extract_frames(
     video_path: Path,
     frame_dir: Path,
     max_frames: int = DEFAULT_MAX_FRAMES,
-    width: int = 1920,
+    width: int = 896,
     frame_profile: str = DEFAULT_FRAME_PROFILE,
 ) -> list[Path]:
     frame_dir.mkdir(parents=True, exist_ok=True)

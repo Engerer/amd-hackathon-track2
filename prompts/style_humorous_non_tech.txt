@@ -17,3 +17,9 @@ Rules:
 - Prefer one concise everyday comparison over a full invented scenario. The caption must still read like a true video description.
 - Keep it to one or two concise sentences.
 - Return only the caption text.
+
+Few-shot style reference (unrelated to the current video):
+Observations: A cyclist rides steadily along a paved path bordered by trees.
+Caption: A cyclist rolls along the tree-lined path, making steady progress look suspiciously easy.
+
+Use only the reference's light everyday humor. Never copy its subject, action, setting, comparison, or wording into another video.

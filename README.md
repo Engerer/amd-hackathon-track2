@@ -30,14 +30,14 @@ video URL
  -> download video
  -> ffprobe checks duration
  -> OpenCV preserves timeline anchors and scores extra candidates for sharpness, exposure, and motion
- -> resize each frame to 1920px width (1920x1080 for 16:9 video)
+ -> resize each frame to 896px width (896x504 for 16:9 video)
  -> overlay a visible frame number, timestamp, and total duration banner without changing resolution
- -> Qwen3.7 Plus receives all five timestamped frames in one multimodal request
- -> Qwen3.7 Plus writes all requested style captions in one multimodal JSON call
+ -> Qwen3.7 Plus receives all five timestamped frames and returns factual observations
+ -> a text-only Qwen3.7 Plus call turns those observations into all four distinct styles
  -> Docker writes /output/results.json
 ```
 
-The Qwen3.7 call receives image frames and returns captions directly:
+The first call returns factual evidence only. The second call receives that evidence plus the four prompt files and returns:
 
 ```json
 {
@@ -46,27 +46,24 @@ The Qwen3.7 call receives image frames and returns captions directly:
     "sarcastic": "...",
     "humorous_tech": "...",
     "humorous_non_tech": "..."
-  },
-  "visual_facts": ["brief factual details used for grounding"]
+  }
 }
 ```
 
-The prompt establishes one shared factual core before generating all four styles, so humor changes tone without changing the visible subject, action, or setting. Optional style repair remains available for local experiments but is disabled in the timed submission.
+The style call generates captions in a fixed order and must avoid opening phrases and sentence structures already used earlier in the same response. Optional style repair remains available for local experiments but is disabled in the timed submission.
 
 ## Defaults
 
-- Direct multimodal model: `accounts/fireworks/models/qwen3p7-plus`
-- Caption model setting: also `accounts/fireworks/models/qwen3p7-plus` for compatibility
+- Multimodal observation model: `accounts/fireworks/models/qwen3p7-plus`
+- Text-only style model: `accounts/fireworks/models/qwen3p7-plus`
 - Frame sampling: five hybrid timeline and salience frames
 - Frame cap: exactly `5` total frames for 30-120 second clips
-- Frame width: `1920px` (`1920x1080` for 16:9 video)
+- Frame width: `896px` (`896x504` for 16:9 video)
 - Model input: five separate timestamped frame images sent simultaneously
-- Whisper audio transcription: off by default in Docker
-- Volume-only audio cues: off by default in Docker
 - Internal judge checks: off by default
 - Fireworks key: stored in a Cloudflare Worker secret, not in the repo
 
-Important: Qwen receives exactly five images per clip in a single request. Each image is labeled with its frame number, timestamp, and the full video duration, and the prompt repeats the same timing metadata.
+Important: Qwen receives exactly five images per clip in the observation request. The extraction timestamp is encoded in each filename, drawn into the top image banner, and repeated in a text content part immediately before that image. The total duration is present in the banner, frame label, and observation metadata.
 
 ## Quick Start
 
@@ -151,32 +148,21 @@ $env:TRACK2_OUTPUT="sample_output/results.json"
 Remove-Item Env:TRACK2_INPUT,Env:TRACK2_OUTPUT
 ```
 
-## Optional Whisper
-
-Whisper can transcribe video audio and pass the transcript into the caption pipeline.
-
-Install optional dependencies:
-
-```powershell
-.\.venv\Scripts\pip install -r requirements-whisper.txt
-```
-
-Enable it for harness runs:
-
-```powershell
-$env:AUTO_TRANSCRIBE="true"
-$env:WHISPER_MODEL="base"
-```
-
-The submitted Docker image keeps `AUTO_TRANSCRIBE=off` and does not install Whisper, avoiding the large Torch dependency and CPU transcription cost. Local experiments can still enable it explicitly.
-
 ## Docker
 
 Build locally:
 
 ```powershell
-docker build --build-arg MODEL_PROXY_URL=https://track2-fireworks-proxy.proxide-track2.workers.dev --build-arg FIREWORKS_MODEL=accounts/fireworks/models/qwen3p7-plus -t amd-track2-captioner:local .
+docker buildx build --platform linux/amd64 --provenance=false --sbom=false --load --build-arg MODEL_PROXY_URL=https://track2-fireworks-proxy.proxide-track2.workers.dev --build-arg FIREWORKS_MODEL=accounts/fireworks/models/qwen3p7-plus -t amd-track2-captioner:local .
 ```
+
+Publish the challenge image with the same single-platform settings:
+
+```powershell
+docker buildx build --platform linux/amd64 --provenance=false --sbom=false --push -t engeraaa/amd-track2-captioner:latest .
+```
+
+Disabling provenance and SBOM attestations keeps `latest` as one plain `linux/amd64` manifest for compatibility with minimal challenge image pullers.
 
 Run locally:
 
@@ -250,16 +236,8 @@ TRACK2_FRAME_PROFILE=hybrid
 TRACK2_MAX_FRAMES=5
 TRACK2_MODEL_CALL_RESERVE_SECONDS=75
 TRACK2_ENABLE_STYLE_RETRY=false
-TRACK2_AUDIO_CUES=false
-TRACK2_AUDIO_CUE_SECONDS=20
-TRACK2_MAX_TRANSCRIBED_CLIPS=3
-TRACK2_TRANSCRIBE_MAX_DURATION_SECONDS=90
-TRACK2_TRANSCRIBE_BEFORE_SECONDS=360
 TRACK2_DRY_RUN=true
 RUN_CHECKS=true
-AUTO_TRANSCRIBE=off
-WHISPER_MODEL=tiny
-WHISPER_LANGUAGE=en
 MODEL_PROXY_URL=https://track2-fireworks-proxy.proxide-track2.workers.dev
 FIREWORKS_MODEL=accounts/fireworks/models/qwen3p7-plus
 FIREWORKS_CAPTION_MODEL=accounts/fireworks/models/qwen3p7-plus
@@ -273,14 +251,10 @@ Recommended final settings:
 
 ```text
 RUN_CHECKS=false
-AUTO_TRANSCRIBE=off
 TRACK2_FRAME_PROFILE=hybrid
 TRACK2_MAX_FRAMES=5
 TRACK2_MODEL_CALL_RESERVE_SECONDS=75
 TRACK2_ENABLE_STYLE_RETRY=false
-TRACK2_AUDIO_CUES=false
-TRACK2_MAX_TRANSCRIBED_CLIPS=0
-TRACK2_TRANSCRIBE_MAX_DURATION_SECONDS=90
 FIREWORKS_CAPTION_MAX_TOKENS=800
 FIREWORKS_CREATIVE_TEMPERATURE=0.45
 FIREWORKS_MAX_RETRIES=1
@@ -289,7 +263,7 @@ FIREWORKS_REQUEST_TIMEOUT_SECONDS=28
 
 ## Prompt Tuning
 
-The production multimodal prompt, factual-core schema, and concise style templates live in `track2_captioner/caption_pipeline.py`. The files under `prompts/` support optional local judging and legacy single-style workflows.
+The production factual prompt and four few-shot style prompts live under `prompts/`. `track2_captioner/caption_pipeline.py` loads those files into the two-stage request and enforces the strict observation and caption schemas.
 
 ## Security
 

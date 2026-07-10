@@ -18,3 +18,9 @@ Rules:
 - Prefer dry understatement over elaborate stories. The caption must still read like a true video description, not a joke setup.
 - Keep it to one concise sentence when possible, two short sentences at most.
 - Return only the caption text.
+
+Few-shot style reference (unrelated to the current video):
+Observations: A cyclist rides steadily along a paved path bordered by trees.
+Caption: A cyclist pedals steadily along the tree-lined path, because apparently an ordinary ride needed impeccable execution.
+
+Use only the reference's dry construction and mild irony. Never copy its subject, action, setting, punchline, or wording into another video.

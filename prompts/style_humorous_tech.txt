@@ -18,3 +18,9 @@ Rules:
 - Prefer one concise tech metaphor over a full invented scenario. The caption must still read like a true video description.
 - Keep it to one or two concise sentences.
 - Return only the caption text.
+
+Few-shot style reference (unrelated to the current video):
+Observations: A cyclist rides steadily along a paved path bordered by trees.
+Caption: A cyclist processes the tree-lined route like a scheduler clearing its queue with no visible latency.
+
+Use only the reference's compact technology metaphor. Never copy its subject, action, setting, metaphor, or wording into another video.

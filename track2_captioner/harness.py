@@ -12,7 +12,7 @@ from typing import Any
 
 from track2_captioner.caption_pipeline import CaptionPipeline
 from track2_captioner.config import load_settings
-from track2_captioner.video_ingest import DEFAULT_FRAME_PROFILE, DEFAULT_MAX_FRAMES, VIDEO_EXTENSIONS, VideoAsset, probe_duration_seconds
+from track2_captioner.video_ingest import DEFAULT_FRAME_PROFILE, DEFAULT_MAX_FRAMES, VIDEO_EXTENSIONS, VideoAsset
 
 
 DEFAULT_STYLES = ["formal", "sarcastic", "humorous_tech", "humorous_non_tech"]
@@ -48,13 +48,6 @@ def read_tasks(input_path: Path) -> list[dict[str, Any]]:
 def float_env(name: str, default: float) -> float:
     try:
         return float(os.getenv(name, str(default)))
-    except ValueError:
-        return default
-
-
-def int_env(name: str, default: int) -> int:
-    try:
-        return int(os.getenv(name, str(default)))
     except ValueError:
         return default
 
@@ -107,15 +100,6 @@ def write_results(output_path: Path, results: list[dict[str, Any]]) -> None:
     output_path.write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
 
 
-def transcribe_mode(value: str | None) -> str:
-    normalized = str(value or "").strip().lower()
-    if normalized in {"1", "true", "yes", "y", "on"}:
-        return "always"
-    if normalized in {"auto", "conditional"}:
-        return "conditional"
-    return "off"
-
-
 def choose_task_frame_budget(
     max_frames: int,
     task_count: int,
@@ -143,14 +127,7 @@ def run_harness(input_path: Path, output_path: Path) -> int:
     started_at = time.monotonic()
     settings = load_settings()
     dry_run = truthy(os.getenv("TRACK2_DRY_RUN"))
-    auto_transcribe = transcribe_mode(os.getenv("AUTO_TRANSCRIBE"))
-    force_transcribe = truthy(os.getenv("FORCE_TRANSCRIBE"))
     run_checks = truthy(os.getenv("RUN_CHECKS"))
-    audio_cues_enabled = truthy(os.getenv("TRACK2_AUDIO_CUES", "false"))
-    audio_cue_seconds = float_env("TRACK2_AUDIO_CUE_SECONDS", 20.0)
-    max_transcribed_clips = int_env("TRACK2_MAX_TRANSCRIBED_CLIPS", 3)
-    transcribe_max_duration = float_env("TRACK2_TRANSCRIBE_MAX_DURATION_SECONDS", 90.0)
-    transcribe_before_seconds = float_env("TRACK2_TRANSCRIBE_BEFORE_SECONDS", 360.0)
     max_frames = int(os.getenv("TRACK2_MAX_FRAMES", str(DEFAULT_MAX_FRAMES)))
     frame_profile = os.getenv("TRACK2_FRAME_PROFILE", DEFAULT_FRAME_PROFILE)
     enable_style_retry = truthy(os.getenv("TRACK2_ENABLE_STYLE_RETRY", "true"))
@@ -167,9 +144,6 @@ def run_harness(input_path: Path, output_path: Path) -> int:
         max(0.0, hard_deadline_seconds - model_call_reserve_seconds),
     )
     caption_fallback_deadline = started_at + fallback_captions_after
-    whisper_model = os.getenv("WHISPER_MODEL", "base")
-    whisper_language = os.getenv("WHISPER_LANGUAGE", "").strip() or None
-    transcribed_count = 0
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     tasks = read_tasks(input_path)
@@ -187,7 +161,6 @@ def run_harness(input_path: Path, output_path: Path) -> int:
     with tempfile.TemporaryDirectory(prefix="track2_harness_") as temp_dir_name:
         temp_dir = Path(temp_dir_name)
         video_dir = temp_dir / "videos"
-        transcript_dir = temp_dir / "transcripts"
         pipeline = CaptionPipeline(
             settings=settings,
             work_dir=temp_dir / "frames",
@@ -257,10 +230,9 @@ def run_harness(input_path: Path, output_path: Path) -> int:
                     submit_download(task_index + prefetch_depth)
                     video_path = download_future.result(timeout=min(45.0, remaining_for_download))
                     download_seconds = time.monotonic() - download_started_at
-                asset = VideoAsset(video_id=task_id, path=video_path, transcript_path=None)
+                asset = VideoAsset(video_id=task_id, path=video_path)
 
                 elapsed = time.monotonic() - started_at
-                duration = probe_duration_seconds(video_path)
                 task_max_frames = choose_task_frame_budget(
                     max_frames=max_frames,
                     task_count=len(tasks),
@@ -274,64 +246,6 @@ def run_harness(input_path: Path, output_path: Path) -> int:
                 if hard_deadline_seconds - elapsed <= model_call_reserve_seconds:
                     force_fallback_captions = True
 
-                audio_context = ""
-                audio_cues = None
-                format_audio_context_fn = None
-                if audio_cues_enabled and not dry_run:
-                    try:
-                        from track2_captioner.audio_cues import (
-                            analyze_audio_cues,
-                            format_audio_context as loaded_format_audio_context,
-                        )
-
-                        format_audio_context_fn = loaded_format_audio_context
-                        audio_cues = analyze_audio_cues(video_path, sample_seconds=audio_cue_seconds)
-                        audio_context = format_audio_context_fn(audio_cues)
-                    except Exception as exc:
-                        print(f"Task {task_id}: audio cues skipped: {exc}", file=sys.stderr)
-
-                should_transcribe = (
-                    auto_transcribe == "always"
-                    or (
-                        auto_transcribe == "conditional"
-                        and audio_cues is not None
-                        and audio_cues.has_audio
-                        and not audio_cues.likely_quiet
-                        and transcribed_count < max_transcribed_clips
-                        and (duration is None or duration <= transcribe_max_duration)
-                    )
-                )
-                should_transcribe = (
-                    should_transcribe
-                    and elapsed < min(reduce_frames_after, transcribe_before_seconds)
-                    and hard_deadline_seconds - elapsed > model_call_reserve_seconds + 30.0
-                    and not force_fallback_captions
-                )
-
-                if should_transcribe:
-                    try:
-                        from track2_captioner.transcription import transcribe_video
-
-                        transcribed_count += 1
-                        transcript_path = transcribe_video(
-                            video_path=video_path,
-                            transcript_dir=transcript_dir,
-                            model_name=whisper_model,
-                            language=whisper_language,
-                            force=force_transcribe,
-                        )
-                        asset = VideoAsset(video_id=task_id, path=video_path, transcript_path=transcript_path)
-                        transcript_text = transcript_path.read_text(encoding="utf-8").strip()
-                        audio_context = (
-                            format_audio_context_fn(audio_cues, transcript_text)
-                            if audio_cues and format_audio_context_fn
-                            else transcript_text
-                        )
-                    except Exception as exc:
-                        print(f"Task {task_id}: Whisper skipped: {exc}", file=sys.stderr)
-                elif auto_transcribe != "off":
-                    print(f"Task {task_id}: Whisper skipped by runtime guard.", file=sys.stderr)
-
                 processed = pipeline.process(
                     asset,
                     styles=styles,
@@ -340,7 +254,6 @@ def run_harness(input_path: Path, output_path: Path) -> int:
                     enable_style_retry=task_enable_style_retry,
                     force_fallback_captions=force_fallback_captions,
                     caption_fallback_deadline=caption_fallback_deadline,
-                    audio_context=audio_context,
                 )
                 captions = processed.get("captions", {})
                 output_results[task_index] = {
@@ -361,8 +274,7 @@ def run_harness(input_path: Path, output_path: Path) -> int:
                         f"vision={timings.get('vision_observation_sec', 0.0):.1f}s "
                         f"captions={timings.get('caption_generation_sec', 0.0):.1f}s "
                         f"task_total={task_total:.1f}s elapsed={elapsed_total:.1f}s "
-                        f"max_frames={task_max_frames} retry={task_enable_style_retry} "
-                        f"transcribed={transcribed_count}"
+                        f"max_frames={task_max_frames} retry={task_enable_style_retry}"
                     ),
                     file=sys.stderr,
                 )

@@ -11,7 +11,6 @@ ENV MODEL_PROXY_URL=${MODEL_PROXY_URL} \
     FIREWORKS_MODEL=${FIREWORKS_MODEL} \
     FIREWORKS_CAPTION_MODEL=${FIREWORKS_CAPTION_MODEL} \
     FIREWORKS_JUDGE_MODEL=${FIREWORKS_MODEL} \
-    AUTO_TRANSCRIBE=off \
     RUN_CHECKS=false \
     TRACK2_RUNTIME_TARGET_SECONDS=540 \
     TRACK2_HARD_DEADLINE_SECONDS=585 \
@@ -19,16 +18,10 @@ ENV MODEL_PROXY_URL=${MODEL_PROXY_URL} \
     TRACK2_MAX_FRAMES=5 \
     TRACK2_MODEL_CALL_RESERVE_SECONDS=75 \
     TRACK2_ENABLE_STYLE_RETRY=false \
-    TRACK2_AUDIO_CUES=false \
-    TRACK2_AUDIO_CUE_SECONDS=20 \
-    TRACK2_MAX_TRANSCRIBED_CLIPS=0 \
-    TRACK2_TRANSCRIBE_MAX_DURATION_SECONDS=90 \
-    TRACK2_TRANSCRIBE_BEFORE_SECONDS=360 \
     FIREWORKS_CAPTION_MAX_TOKENS=800 \
     FIREWORKS_CREATIVE_TEMPERATURE=0.45 \
     FIREWORKS_MAX_RETRIES=1 \
-    FIREWORKS_REQUEST_TIMEOUT_SECONDS=28 \
-    WHISPER_MODEL=tiny
+    FIREWORKS_REQUEST_TIMEOUT_SECONDS=28
 
 WORKDIR /app
 
@@ -36,12 +29,8 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-ARG INSTALL_WHISPER=false
-
-COPY requirements.txt requirements-whisper.txt ./
+COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
-RUN if [ "$INSTALL_WHISPER" = "true" ]; then pip install --no-cache-dir -r requirements-whisper.txt; fi
-RUN if [ "$INSTALL_WHISPER" = "true" ]; then python -c "import whisper; whisper.load_model('tiny')"; fi
 
 COPY . .
 

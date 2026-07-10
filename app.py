@@ -11,7 +11,6 @@ import streamlit as st
 
 from track2_captioner.caption_pipeline import CaptionPipeline
 from track2_captioner.config import Settings, load_settings
-from track2_captioner.transcription import WHISPER_MODELS, transcribe_video, transcribe_video_async
 from track2_captioner.video_ingest import (
     MAX_VIDEO_DURATION_SECONDS,
     MIN_VIDEO_DURATION_SECONDS,
@@ -26,7 +25,6 @@ from track2_captioner.video_ingest import (
 APP_ROOT = Path(__file__).resolve().parent
 DATA_DIR = APP_ROOT / "data"
 DEFAULT_VIDEO_DIR = DATA_DIR / "videos"
-DEFAULT_TRANSCRIPT_DIR = DATA_DIR / "transcripts"
 OUTPUT_DIR = APP_ROOT / "outputs"
 WEB_RUN_DIR = OUTPUT_DIR / "web_runs"
 LATEST_OUTPUT = OUTPUT_DIR / "latest_web_results.json"
@@ -58,7 +56,7 @@ def safe_filename(name: str) -> str:
 
 
 def ensure_dirs() -> None:
-    for path in [DEFAULT_VIDEO_DIR, DEFAULT_TRANSCRIPT_DIR, OUTPUT_DIR, WEB_RUN_DIR]:
+    for path in [DEFAULT_VIDEO_DIR, OUTPUT_DIR, WEB_RUN_DIR]:
         path.mkdir(parents=True, exist_ok=True)
 
 
@@ -72,50 +70,17 @@ def write_uploaded_files(files: list[Any], destination: Path) -> list[Path]:
     return saved
 
 
-def assets_from_uploads(video_files: list[Any], transcript_files: list[Any]) -> tuple[list[VideoAsset], Path]:
+def assets_from_uploads(video_files: list[Any]) -> tuple[list[VideoAsset], Path]:
     run_id = time.strftime("%Y%m%d-%H%M%S")
     run_dir = WEB_RUN_DIR / run_id
     video_dir = run_dir / "videos"
-    transcript_dir = run_dir / "transcripts"
 
     saved_videos = [
         path for path in write_uploaded_files(video_files, video_dir)
         if path.suffix.lower() in VIDEO_EXTENSIONS
     ]
-    write_uploaded_files(transcript_files, transcript_dir)
-
-    assets = []
-    for path in sorted(saved_videos):
-        transcript_path = transcript_dir / f"{path.stem}.txt"
-        assets.append(
-            VideoAsset(
-                video_id=path.stem,
-                path=path,
-                transcript_path=transcript_path if transcript_path.exists() else None,
-            )
-        )
+    assets = [VideoAsset(video_id=path.stem, path=path) for path in sorted(saved_videos)]
     return assets, run_dir
-
-
-def maybe_transcribe_asset(
-    asset: VideoAsset,
-    transcript_dir: Path,
-    model_name: str,
-    language: str,
-    force: bool,
-) -> VideoAsset:
-    transcript_path = transcribe_video(
-        video_path=asset.path,
-        transcript_dir=transcript_dir,
-        model_name=model_name,
-        language=language.strip() or None,
-        force=force,
-    )
-    return VideoAsset(
-        video_id=asset.video_id,
-        path=asset.path,
-        transcript_path=transcript_path,
-    )
 
 
 def strip_heavy_data(result: dict[str, Any]) -> dict[str, Any]:
@@ -247,10 +212,6 @@ def main() -> None:
     dry_run = not bool(defaults.api_key or defaults.proxy_url)
     max_frames = DEFAULT_FRAME_COUNT
     run_checks = False
-    auto_transcribe = False
-    whisper_model = WHISPER_MODELS[1] if len(WHISPER_MODELS) > 1 else WHISPER_MODELS[0]
-    whisper_language = ""
-    force_transcribe = False
     backend = default_backend
     api_key = os.getenv("FIREWORKS_API_KEY", "")
     proxy_url = default_proxy_url
@@ -271,12 +232,6 @@ def main() -> None:
             source_mode = st.radio("Source", ["Upload", "data/videos"], horizontal=True)
             dry_run = st.toggle("Dry run", value=dry_run)
             run_checks = st.toggle("Quality checks", value=False)
-
-            auto_transcribe = st.toggle("Whisper", value=False)
-            if auto_transcribe:
-                whisper_model = st.selectbox("Whisper model", WHISPER_MODELS, index=1)
-                whisper_language = st.text_input("Language", value="", placeholder="optional, e.g. en")
-                force_transcribe = st.toggle("Overwrite transcripts", value=False)
 
             backend = st.radio(
                 "Backend",
@@ -324,18 +279,10 @@ def main() -> None:
                 accept_multiple_files=True,
             )
             video_files = list(video_files or [])
-            with st.expander("Transcripts", expanded=False):
-                transcript_files = st.file_uploader(
-                    "Upload matching .txt files",
-                    type=["txt"],
-                    accept_multiple_files=True,
-                )
-                transcript_files = list(transcript_files or [])
             existing_assets: list[VideoAsset] = []
         else:
             video_files = []
-            transcript_files = []
-            existing_assets = discover_videos(DEFAULT_VIDEO_DIR.resolve(), DEFAULT_TRANSCRIPT_DIR.resolve())
+            existing_assets = discover_videos(DEFAULT_VIDEO_DIR.resolve())
             st.write([asset.path.name for asset in existing_assets] or "No files in data/videos.")
 
     with run_col:
@@ -360,12 +307,10 @@ def main() -> None:
             if not video_files:
                 st.warning("Add at least one video.")
                 return
-            assets, run_dir = assets_from_uploads(video_files, transcript_files)
-            transcript_dir = run_dir / "transcripts"
+            assets, run_dir = assets_from_uploads(video_files)
             work_dir = run_dir / "frames"
         else:
             assets = existing_assets
-            transcript_dir = DEFAULT_TRANSCRIPT_DIR
             work_dir = DATA_DIR / "frames"
 
         if not assets:
@@ -406,23 +351,6 @@ def main() -> None:
                 duration = validate_video_duration(asset.path)
                 if duration is not None:
                     current.write(f"Processing {asset.video_id} ({format_duration(duration)})")
-                if auto_transcribe and (force_transcribe or asset.transcript_path is None):
-                    current.write(f"Transcribing {asset.video_id} with Whisper")
-                    with st.spinner(f"Whisper transcribing {asset.video_id}…"):
-                        future = transcribe_video_async(
-                            video_path=asset.path,
-                            transcript_dir=transcript_dir,
-                            model_name=whisper_model,
-                            language=whisper_language.strip() or None,
-                            force=force_transcribe,
-                        )
-                        transcript_path = future.result()  # blocks with spinner
-                    asset = VideoAsset(
-                        video_id=asset.video_id,
-                        path=asset.path,
-                        transcript_path=transcript_path,
-                    )
-                    current.write(f"Processing {asset.video_id}")
                 results.append(strip_heavy_data(pipeline.process(asset)))
             except Exception as exc:
                 results.append(

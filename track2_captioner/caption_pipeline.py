@@ -25,20 +25,18 @@ from track2_captioner.video_ingest import (
 
 logger = logging.getLogger(__name__)
 
-CAPTION_SCHEMA = json.dumps({
-    "core_facts": {
-        "subject": "main visible subject, using generic wording if uncertain",
-        "action": "main visible action or state",
-        "setting": "visible setting without guessing a specific location",
-        "important_objects": ["objects that matter to the caption"],
-    },
-    "description": "1-2 sentence neutral description of the sampled video evidence",
+OBSERVATION_SCHEMA = json.dumps({
+    "summary": "one factual overview sentence",
+    "setting": "visible setting without guessing a specific location",
+    "subjects": ["main visible subjects, using generic wording if uncertain"],
+    "key_objects": ["visible objects that matter to the caption"],
     "visible_text": ["readable text visible in the frames, or []"],
     "actions": ["specific visible actions, or []"],
-    "objects": ["important visible objects, or []"],
     "timeline": ["brief chronological notes from the sampled frames"],
-    "visual_facts": ["brief factual details used for grounding"],
     "uncertainties": ["details that should not become concrete caption claims"],
+}, indent=2)
+
+CAPTION_SCHEMA = json.dumps({
     "captions": {
         "formal": "formal caption when requested",
         "sarcastic": "sarcastic caption when requested",
@@ -53,13 +51,13 @@ CHECK_SCHEMA = json.dumps({
     "notes": "brief explanation",
 }, indent=2)
 
-DIRECT_CAPTION_SYSTEM = (
-    "You are a direct multimodal video captioning agent. "
-    "Inspect the sampled video frames in chronological order and generate final captions directly. "
-    "Establish one shared factual core before writing any styled captions. Return strict JSON only."
+STYLE_CAPTION_SYSTEM = (
+    "You are the text-only style stage of a video captioning pipeline. "
+    "Treat the supplied factual observations as the complete source of truth. "
+    "Generate every requested style in order and return strict JSON only."
 )
-TIMESTAMP_BANNER_HEIGHT = 64
-TIMESTAMP_FONT_SIZE = 32
+TIMESTAMP_BANNER_HEIGHT = 44
+TIMESTAMP_FONT_SIZE = 22
 
 HUMOR_NON_TECH_WORDS = {
     "actually",
@@ -130,7 +128,6 @@ EMPTY_OBSERVATIONS = {
     "actions": [],
     "timeline": [],
     "visible_text": [],
-    "audio_or_speech": [],
     "uncertainties": ["Dry run or fallback did not inspect the video."],
 }
 
@@ -139,23 +136,6 @@ DRY_RUN_CAPTIONS = {
     "sarcastic": "A sample subject performs a sample action, because apparently the plot needed momentum.",
     "humorous_tech": "A sample subject executes the action pipeline with no visible rollback plan.",
     "humorous_non_tech": "A sample subject gets things moving, and honestly, that is more than some Mondays manage.",
-}
-
-STYLE_DESCRIPTIONS = {
-    "formal": "Professional, objective, factual tone. No jokes, slang, sarcasm, or embellishment.",
-    "sarcastic": "Dry, ironic, lightly mocking tone while staying true to the visible video.",
-    "humorous_tech": (
-        "Funny through one consistent technology metaphor, such as APIs, debugging, game engines, "
-        "networking, robotics, queues, deploys, or runtime behavior. Do not mix unrelated metaphors."
-    ),
-    "humorous_non_tech": "Funny everyday humor for a general audience, with no technical jargon.",
-}
-
-STYLE_TEMPLATES = {
-    "formal": "State the shared factual core plainly and objectively.",
-    "sarcastic": "State the shared factual core, then add a short dry ironic aside about only the visible action.",
-    "humorous_tech": "State the shared factual core through one concise technology metaphor without adding events.",
-    "humorous_non_tech": "State the shared factual core with one everyday joke or comparison and no technical language.",
 }
 
 CAPTION_STYLE_ALIASES = {
@@ -225,7 +205,6 @@ class CaptionPipeline:
         enable_style_retry: bool | None = None,
         force_fallback_captions: bool = False,
         caption_fallback_deadline: float | None = None,
-        audio_context: str = "",
     ) -> dict[str, Any]:
         started_at = time.monotonic()
         timings: dict[str, float] = {}
@@ -250,7 +229,6 @@ class CaptionPipeline:
             model_images = self._prepare_model_images(frames, frame_dir, video_duration)
         timings["frame_extraction_sec"] = time.monotonic() - frame_started_at
 
-        transcript = self._read_transcript(asset)
         caption_started_at = time.monotonic()
         if should_fallback:
             observations = dict(EMPTY_OBSERVATIONS)
@@ -264,8 +242,6 @@ class CaptionPipeline:
                 model_images=model_images,
                 source_frame_count=len(frames),
                 video_duration=video_duration,
-                transcript=transcript,
-                audio_context=audio_context,
                 styles=selected_styles,
                 enable_style_retry=(
                     self.enable_style_retry
@@ -396,8 +372,6 @@ class CaptionPipeline:
         model_images: list[Path],
         source_frame_count: int,
         video_duration: float | None,
-        transcript: str,
-        audio_context: str,
         styles: list[str],
         enable_style_retry: bool,
     ) -> tuple[dict[str, str], dict[str, Any]]:
@@ -405,49 +379,59 @@ class CaptionPipeline:
             return {style: DRY_RUN_CAPTIONS[style] for style in styles}, dict(EMPTY_OBSERVATIONS)
 
         assert self.client is not None
-        content = self._direct_caption_content(
+        perception_content = self._direct_caption_content(
             asset,
             model_images,
             source_frame_count,
             video_duration,
-            transcript,
-            audio_context,
-            styles,
         )
-        response = self.client.chat(
+        perception_response = self.client.chat(
             self.settings.model,
             [
-                {"role": "system", "content": DIRECT_CAPTION_SYSTEM},
-                {"role": "user", "content": content},
+                {"role": "system", "content": load_prompt("perception_system.txt")},
+                {"role": "user", "content": perception_content},
+            ],
+            max_tokens=self.settings.max_tokens,
+            temperature=self.settings.temperature,
+            reasoning_effort=self.settings.reasoning_effort,
+            json_mode=True,
+        )
+        parsed_observations = self._parse_or_repair_json(
+            perception_response,
+            "factual video observations",
+            OBSERVATION_SCHEMA,
+        )
+        observations = self._observations_from_direct_response(parsed_observations)
+
+        style_request = self._style_caption_request(observations, styles)
+        caption_response = self.client.chat(
+            self.settings.caption_model,
+            [
+                {"role": "system", "content": STYLE_CAPTION_SYSTEM},
+                {"role": "user", "content": json.dumps(style_request, indent=2)},
             ],
             max_tokens=self.settings.caption_max_tokens,
             temperature=self.settings.creative_temperature,
             reasoning_effort=self.settings.reasoning_effort,
             json_mode=True,
         )
-        parsed = self._parse_or_repair_json(response, "direct multimodal captions", CAPTION_SCHEMA)
-        observations = self._observations_from_direct_response(parsed)
-        raw_captions = self._extract_caption_map(styles, parsed)
+        parsed_captions = self._parse_or_repair_json(
+            caption_response,
+            "styled captions",
+            CAPTION_SCHEMA,
+        )
+        raw_captions = self._extract_caption_map(styles, parsed_captions)
         captions = self._sanitize_caption_map(styles, raw_captions, observations)
 
         if enable_style_retry:
             issues = self._caption_issues(styles, raw_captions)
             if issues:
                 captions = self._retry_direct_captions(
-                    asset,
-                    model_images,
-                    source_frame_count,
-                    video_duration,
-                    transcript,
-                    audio_context,
+                    observations,
                     styles,
                     captions,
                     issues,
                 )
-                observations = self._observations_from_direct_response({
-                    "captions": captions,
-                    "visual_facts": observations.get("key_objects", []),
-                })
 
         return captions, observations
 
@@ -457,15 +441,7 @@ class CaptionPipeline:
         model_images: list[Path],
         source_frame_count: int,
         video_duration: float | None,
-        transcript: str,
-        audio_context: str,
-        styles: list[str],
     ) -> list[dict[str, Any]]:
-        style_requirements = {
-            style: STYLE_DESCRIPTIONS[style]
-            for style in styles
-            if style in STYLE_DESCRIPTIONS
-        }
         frame_timestamps = [
             round(self._frame_timestamp(frame, index, len(model_images), video_duration), 3)
             for index, frame in enumerate(model_images)
@@ -477,45 +453,23 @@ class CaptionPipeline:
         )
         request = {
             "video_id": asset.video_id,
-            "task": "Use the five timestamped frames to generate all four final caption styles in one response.",
+            "task": "Use the five timestamped frames to produce factual ground-truth observations only.",
             "visual_input": visual_input,
             "video_duration_seconds": round(video_duration, 3) if video_duration else None,
             "video_duration": self._format_timestamp(video_duration),
             "frame_timestamps_seconds": frame_timestamps,
-            "requested_styles": style_requirements,
-            "style_templates": {
-                style: STYLE_TEMPLATES[style]
-                for style in styles
-                if style in STYLE_TEMPLATES
-            },
-            "optional_transcript": transcript or "[none provided]",
-            "optional_audio_context": audio_context or "[none provided]",
             "rules": [
                 "Use the frames as the primary source of truth.",
                 "These are exactly five chronological frames sampled from one video, not five separate images or videos.",
                 "Use each frame timestamp and the total video duration to reason about chronology and change over time.",
-                "First establish one core_facts object containing the shared subject, action, setting, and important objects.",
-                "Every styled caption must preserve the same core subject, action, and setting; style may change wording but not facts.",
-                "Begin each caption with a recognizable factual clause before adding sarcasm or humor.",
-                "A humorous or sarcastic clause must not introduce new visible nouns, actions, speech, motives, or locations.",
-                "Also return description, visible_text, actions, objects, timeline, visual_facts, and uncertainties as compact grounding fields.",
                 "For visible_text, list only readable text that is actually visible; use [] if no text is readable.",
-                "If visible text is important, incorporate it naturally in captions as a human viewer would.",
-                "Use transcript or audio context only as supporting evidence; do not invent exact speech, music, or sounds.",
-                "Write every caption in English.",
-                "Treat the five images as chronological samples from one video in Frame 1 through Frame 5 order.",
-                "Mention the main subject, setting, and primary action when visible.",
-                "Use only visible or transcript-backed facts; do not invent motives, identities, locations, speech, or hidden context.",
+                "Describe the main subject, visible setting, important objects, and primary action specifically.",
+                "Use only visible facts; do not invent motives, identities, locations, speech, sounds, or hidden context.",
                 "Never turn uncertainty into a concrete claim.",
-                "Each caption should be one concise sentence, ideally 12 to 30 words.",
-                "For humorous_tech, use one consistent technology metaphor and include a clear tech reference such as API, bug, debug, deploy, latency, log, cache, queue, rollback, runtime, or scheduler.",
-                "For humorous_non_tech, avoid all tech, programming, AI, prompt, model, server, and software jargon.",
-                "Before returning, verify each caption includes visible subject/action/setting when possible and matches its requested style.",
-                "Never mention OCR, VLMs, AI models, prompts, frames, timestamps, storyboards, or video-analysis mechanics in the captions.",
-                "Return captions only for the requested styles.",
+                "Do not write captions, jokes, sarcasm, metaphors, or style variations in this stage.",
                 "Return strict JSON matching the schema.",
             ],
-            "response_schema": CAPTION_SCHEMA,
+            "response_schema": OBSERVATION_SCHEMA,
         }
         content: list[dict[str, Any]] = [
             {
@@ -544,6 +498,36 @@ class CaptionPipeline:
         return content
 
     @staticmethod
+    def _style_caption_request(
+        observations: dict[str, Any],
+        styles: list[str],
+    ) -> dict[str, Any]:
+        style_instructions = {
+            style: load_prompt(STYLE_PROMPTS[style])
+            for style in styles
+            if style in STYLE_PROMPTS
+        }
+        return {
+            "task": "Generate all requested captions from the factual observations without seeing the source frames.",
+            "ground_truth_observations": observations,
+            "generation_order": styles,
+            "style_instructions": style_instructions,
+            "rules": [
+                "The ground_truth_observations are the complete factual source; do not add unsupported details.",
+                "Treat every few-shot example as an unrelated tone reference only; never copy its facts or distinctive wording.",
+                "Generate captions in generation_order so earlier captions are available as prior_captions for later captions.",
+                "Before each caption after the first, compare it with all prior_captions already generated in this response.",
+                "Do not reuse the sentence structures or opening phrases of prior_captions; use a different syntactic layout.",
+                "Preserve the same visible subject, action, setting, and important objects across all four captions.",
+                "Each caption must be one concise sentence, ideally 12 to 30 words.",
+                "Never mention observations, prompts, models, frames, timestamps, storyboards, or analysis mechanics.",
+                "Place only the final caption text in each captions value, even when a style file says to return only text.",
+                "Return strict JSON matching the schema.",
+            ],
+            "response_schema": CAPTION_SCHEMA,
+        }
+
+    @staticmethod
     def _visual_input_description(
         model_images: list[Path],
         source_frame_count: int,
@@ -557,70 +541,40 @@ class CaptionPipeline:
 
     def _retry_direct_captions(
         self,
-        asset: VideoAsset,
-        model_images: list[Path],
-        source_frame_count: int,
-        video_duration: float | None,
-        transcript: str,
-        audio_context: str,
+        observations: dict[str, Any],
         styles: list[str],
         current_captions: dict[str, str],
         issues: list[str],
     ) -> dict[str, str]:
         assert self.client is not None
         repair_request = {
-            "video_id": asset.video_id,
-            "task": "Repair the direct video captions using the frames again.",
+            "task": "Repair the styled captions using only the factual observations.",
+            "ground_truth_observations": observations,
             "issues": issues,
             "current_captions": current_captions,
-            "visual_input": self._visual_input_description(
-                model_images,
-                source_frame_count,
-                video_duration,
-            ),
-            "video_duration_seconds": round(video_duration, 3) if video_duration else None,
-            "requested_styles": {
-                style: STYLE_DESCRIPTIONS[style]
+            "generation_order": styles,
+            "style_instructions": {
+                style: load_prompt(STYLE_PROMPTS[style])
                 for style in styles
-                if style in STYLE_DESCRIPTIONS
+                if style in STYLE_PROMPTS
             },
-            "optional_transcript": transcript or "[none provided]",
-            "optional_audio_context": audio_context or "[none provided]",
             "rules": [
-                "Keep only visible or transcript-backed facts.",
+                "Keep only facts in ground_truth_observations.",
                 "Preserve one identical factual subject, action, and setting across all styles.",
-                "Put the factual clause first; style wording must not introduce new events or objects.",
-                "Write every caption in English.",
                 "Fix only missing, weakly styled, overlong, or jargon-violating captions.",
-                "Use audio context only as supporting evidence, not as a source for invented details.",
-                "If visible text is important, incorporate it naturally without saying OCR or analysis.",
-                "For humorous_tech, keep one consistent technology metaphor.",
-                "Never mention OCR, VLMs, AI models, prompts, frames, timestamps, storyboards, or video-analysis mechanics in the captions.",
+                "Do not reuse sentence structures or opening phrases from any current caption.",
+                "Use a different syntactic layout for each repaired caption.",
+                "Treat few-shot examples as unrelated tone references only.",
                 "Return one concise caption for every requested style.",
                 "Return strict JSON matching the schema.",
             ],
             "response_schema": CAPTION_SCHEMA,
         }
-        content: list[dict[str, Any]] = [{"type": "text", "text": json.dumps(repair_request, indent=2)}]
-        for index, frame in enumerate(model_images):
-            timestamp = self._frame_timestamp(frame, index, len(model_images), video_duration)
-            content.append(
-                {
-                    "type": "text",
-                    "text": (
-                        f"Frame {index + 1}/{len(model_images)} at "
-                        f"{self._format_timestamp(timestamp)} of total "
-                        f"{self._format_timestamp(video_duration)}."
-                    ),
-                }
-            )
-            content.append({"type": "image_url", "image_url": {"url": image_to_data_url(frame)}})
-
         response = self.client.chat(
-            self.settings.model,
+            self.settings.caption_model,
             [
-                {"role": "system", "content": DIRECT_CAPTION_SYSTEM},
-                {"role": "user", "content": content},
+                {"role": "system", "content": STYLE_CAPTION_SYSTEM},
+                {"role": "user", "content": json.dumps(repair_request, indent=2)},
             ],
             max_tokens=self.settings.caption_max_tokens,
             temperature=max(0.2, self.settings.creative_temperature - 0.2),
@@ -631,7 +585,7 @@ class CaptionPipeline:
         repaired = self._extract_caption_map(styles, parsed)
         merged = dict(current_captions)
         merged.update({style: caption for style, caption in repaired.items() if caption})
-        return self._sanitize_caption_map(styles, merged, self._observations_from_direct_response(parsed))
+        return self._sanitize_caption_map(styles, merged, observations)
 
     @staticmethod
     def _extract_caption_map(styles: list[str], parsed: dict[str, Any]) -> dict[str, str]:
@@ -703,7 +657,7 @@ class CaptionPipeline:
             parsed.get("description")
             or parsed.get("summary")
             or core.get("summary")
-            or "Captions were generated directly from sampled frames."
+            or "Factual observations were generated from sampled frames."
         ).strip()
         return {
             "summary": summary,
@@ -713,11 +667,7 @@ class CaptionPipeline:
             "actions": actions,
             "timeline": CaptionPipeline._string_list_from_keys(parsed, ["timeline"]),
             "visible_text": visible_text,
-            "audio_or_speech": CaptionPipeline._string_list_from_keys(parsed, ["audio_or_speech", "speech", "transcript"]),
-            "uncertainties": (
-                CaptionPipeline._string_list_from_keys(parsed, ["uncertainties", "uncertain"])
-                or ["Direct mode uses one multimodal caption call instead of a separate observation pass."]
-            ),
+            "uncertainties": CaptionPipeline._string_list_from_keys(parsed, ["uncertainties", "uncertain"]),
         }
 
     @staticmethod
@@ -879,9 +829,3 @@ class CaptionPipeline:
                 json_mode=True,
             )
             return parse_json_object(repaired)
-
-    @staticmethod
-    def _read_transcript(asset: VideoAsset) -> str:
-        if asset.transcript_path is None:
-            return ""
-        return asset.transcript_path.read_text(encoding="utf-8").strip()
