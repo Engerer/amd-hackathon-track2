@@ -178,19 +178,23 @@ SELECTOR_ALL_STYLES_SYSTEM = (
 )
 
 DIRECT_CAPTION_SYSTEM = (
-    "You are an accuracy-first video captioner. Infer the video only from four sparse, "
-    "chronologically ordered frames and their timestamps. Write a short literal grounding "
-    "clause naming the visible subject, clearest visible action, and setting. Every caption "
-    "must explicitly restate that same grounding; a joke may follow it but may never replace "
-    "it. Sparse frames do not prove continuous action between timestamps. Never invent or "
-    "infer identity, intent, emotion, causality, dialogue, goals, exact quantities, off-screen "
-    "events, or details too small to verify. Mention a change or sequence only when multiple "
-    "ordered frames clearly support it. Each caption is one concise English sentence. formal "
-    "is objective and professional. sarcastic states the grounded fact with a dry, lightly "
-    "mocking aside about the visible situation, never a fictional motive. humorous_tech states "
-    "the grounded fact and adds a natural programming or technology analogy. "
-    "humorous_non_tech states the grounded fact and adds everyday humor with no technology "
-    "jargon. Figurative language cannot add a new factual claim. Return only the "
+    "You are an accuracy-first video captioner. The four images are sparse, "
+    "chronologically ordered samples from one video: early, middle, later, and end. "
+    "Identify a short factual nucleus containing the clearly visible subject, the clearest "
+    "visible action or state, and the setting only when unmistakable. Use only details clearly "
+    "supported by the images; when evidence is ambiguous, choose the broader description. "
+    "Do not infer identity, intent, emotion, thoughts, causality, dialogue, goals, exact counts, "
+    "duration, speed, continuity between frames, camera movement, or off-screen events. Avoid "
+    "mental-state verbs such as believes, decides, expects, wants, knows, remembers, plans, "
+    "hopes, or tries. Every requested caption must preserve the same subject and action facts. "
+    "formal is objective, professional, and literal. sarcastic preserves the literal facts, "
+    "then adds dry irony about the visible situation, never the subject's motives. "
+    "humorous_tech preserves the literal facts, then adds one clearly figurative technology "
+    "or programming comparison. humorous_non_tech preserves the literal facts, then adds one "
+    "clearly figurative everyday comparison with no technology jargon. Figurative comparisons "
+    "are jokes, not additional factual claims. Use one natural English sentence of roughly "
+    "10-24 words per caption. Before returning JSON, silently verify that every concrete claim "
+    "is visible in at least one image and all captions describe the same event. Return only the "
     "schema-conforming JSON object."
 )
 
@@ -390,10 +394,7 @@ class CaptionPipeline:
         if len(keyframes) != 4:
             raise ValueError(f"Direct captioning requires exactly four frames, got {len(keyframes)}.")
 
-        timestamps = [
-            round(self._frame_timestamp(frame, index, 4, video_duration), 3)
-            for index, frame in enumerate(keyframes)
-        ]
+        temporal_positions = ["early", "middle", "later", "end"]
         style_descriptions = {
             "formal": "professional, objective, factual",
             "sarcastic": "dry, ironic, lightly mocking",
@@ -404,26 +405,25 @@ class CaptionPipeline:
             "type": "text",
             "text": json.dumps({
                 "task": "Caption this video directly from the four chronological frames.",
-                "video_duration_seconds": round(video_duration, 3) if video_duration else None,
-                "frame_timestamps_seconds": timestamps,
+                "temporal_positions": temporal_positions,
                 "requested_styles": {
                     style: style_descriptions[style]
                     for style in styles
                 },
                 "output_rules": [
                     "one sentence per requested style",
-                    "12-30 words per caption when practical",
-                    "begin every caption with a literal subject-action-setting clause",
-                    "keep the same verified subject, setting, and action across styles",
-                    "put any joke after the grounded visual fact",
-                    "do not state exact counts, motives, emotions, or unseen outcomes",
+                    "10-24 words per caption when practical",
+                    "preserve the same verified subject and action across styles",
+                    "include the setting only when unmistakable",
+                    "put any joke after the grounded visual facts",
+                    "do not state exact counts, time, motives, emotions, or unseen outcomes",
                 ],
             }, separators=(",", ":")),
         }]
         for index, frame in enumerate(keyframes):
             content.append({
                 "type": "text",
-                "text": f"Frame {index + 1}/4 at {self._format_timestamp(timestamps[index])}",
+                "text": f"Frame {index + 1}/4 - {temporal_positions[index]} video sample",
             })
             content.append({
                 "type": "image_url",

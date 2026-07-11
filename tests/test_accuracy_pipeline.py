@@ -247,6 +247,15 @@ class AccuracyPipelineTests(unittest.TestCase):
             if part.get("type") == "image_url"
         ]
         self.assertEqual(len(image_parts), 4)
+        user_text = " ".join(
+            part.get("text", "")
+            for part in call["messages"][1]["content"]
+            if part.get("type") == "text"
+        )
+        self.assertNotIn("video_duration_seconds", user_text)
+        self.assertNotIn("frame_timestamps_seconds", user_text)
+        self.assertIn("early video sample", user_text)
+        self.assertIn("end video sample", user_text)
         self.assertEqual(
             call["kwargs"]["json_schema"]["required"],
             ["grounding", *DEFAULT_STYLES],
