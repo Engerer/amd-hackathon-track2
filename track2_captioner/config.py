@@ -35,6 +35,7 @@ class Settings:
     stage_deadline_perception: float = 12.0
     stage_deadline_candidates: float = 10.0
     stage_deadline_selection: float = 6.0
+    stage_deadline_direct: float = 23.0
     # --- Evidence extraction ---
     ocr_enabled: bool = True
     crop_enabled: bool = True
@@ -83,6 +84,7 @@ def load_settings() -> Settings:
         stage_deadline_perception=float(os.getenv("TRACK2_STAGE_DEADLINE_PERCEPTION", "12.0")),
         stage_deadline_candidates=float(os.getenv("TRACK2_STAGE_DEADLINE_CANDIDATES", "10.0")),
         stage_deadline_selection=float(os.getenv("TRACK2_STAGE_DEADLINE_SELECTION", "6.0")),
+        stage_deadline_direct=float(os.getenv("TRACK2_STAGE_DEADLINE_DIRECT", "23.0")),
         ocr_enabled=_truthy(os.getenv("TRACK2_OCR_ENABLED", "true")),
         crop_enabled=_truthy(os.getenv("TRACK2_CROP_ENABLED", "true")),
         motion_clip_enabled=_truthy(os.getenv("TRACK2_MOTION_CLIP_ENABLED", "true")),

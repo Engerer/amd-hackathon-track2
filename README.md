@@ -23,22 +23,21 @@ https://github.com/Engerer/amd-hackathon-track2
 
 ## How It Works
 
-The pipeline samples timeline evidence instead of processing every video frame. For every 30-120 second clip, it preserves beginning, middle, and end anchors, then adds up to two visually diverse salience frames.
+The production path uses four frames and one Kimi K2.6 call per clip. For every 30-120 second video it preserves beginning, middle, and end coverage, then adds the strongest non-duplicate motion or salience frame.
 
 ```text
 video URL
  -> download video
  -> ffprobe checks duration
- -> OpenCV preserves three timeline anchors and scores two extra candidates for sharpness, exposure, and motion
- -> perceptual hashes prevent the two salience slots from duplicating existing views
+ -> OpenCV preserves three timeline anchors and selects one extra candidate for sharpness, exposure, and motion
+ -> perceptual hashing prevents the salience frame from duplicating an anchor
  -> resize each frame to 896px width (896x504 for 16:9 video)
- -> Kimi K2.6 receives five pristine frames and returns a schema-constrained evidence ledger
- -> one text call generates candidates for every requested style
- -> one multimodal Kimi K2.6 call sees the five frames again and selects the best caption per style
+ -> one multimodal Kimi K2.6 call receives four chronological pristine frames and their timestamps
+ -> that same call grounds the scene and returns every requested style in schema-constrained JSON
  -> Docker writes /output/results.json
 ```
 
-The first call returns factual evidence only. The second call receives that evidence plus the requested style prompts and returns candidate lists. The third call selects final captions against the original five frames:
+The prompt asks Kimi to identify a shared factual nucleus internally, preserve it across all styles, and vary only the tone. This avoids the information loss and factual drift of intermediate evidence and candidate rewrites:
 
 ```json
 {
@@ -51,20 +50,20 @@ The first call returns factual evidence only. The second call receives that evid
 }
 ```
 
-All three core model calls receive deadline-derived HTTP timeouts. Candidate count scales from one to three based on remaining time, and optional targeted style repair runs only while deadline budget remains.
+The single call receives a deadline-derived HTTP timeout. Schema-constrained output requires every requested style; parsing and caption cleanup are local and never trigger a second model call.
 
 ## Defaults
 
-- Multimodal observation and selector model: `accounts/fireworks/models/kimi-k2p6`
-- Text candidate model: `accounts/fireworks/models/kimi-k2p6`
-- Frame sampling: five hybrid timeline and salience frames
-- Frame cap: exactly `5` total frames for 30-120 second clips
+- Multimodal caption model: `accounts/fireworks/models/kimi-k2p6`
+- Model calls: exactly one under normal inference
+- Frame sampling: four hybrid timeline and salience frames
+- Frame cap: exactly `4` total frames for 30-120 second clips
 - Frame width: `896px` (`896x504` for 16:9 video)
-- Model input: five pristine frame images with timestamps supplied as text metadata
+- Model input: four pristine frame images with timestamps supplied as adjacent text metadata
 - Internal judge checks: off by default
 - Fireworks key: stored in a Cloudflare Worker secret, not in the repo
 
-Important: Kimi receives exactly five images in both the observation and selector requests. The images are not obscured by timestamp banners; timestamps and total duration are supplied as adjacent text metadata.
+Important: Kimi receives exactly four images in one request. The images are not obscured by timestamp banners; timestamps and total duration are supplied as adjacent text metadata.
 
 ## Quick Start
 
@@ -234,11 +233,11 @@ Useful variables:
 TRACK2_RUNTIME_TARGET_SECONDS=540
 TRACK2_HARD_DEADLINE_SECONDS=585
 TRACK2_FRAME_PROFILE=hybrid
-TRACK2_MAX_FRAMES=5
+TRACK2_MAX_FRAMES=4
 TRACK2_MODEL_CALL_RESERVE_SECONDS=75
-TRACK2_ENABLE_STYLE_RETRY=true
+TRACK2_ENABLE_STYLE_RETRY=false
 TRACK2_PER_CLIP_DEADLINE_SECONDS=28
-TRACK2_CANDIDATE_COUNT=3
+TRACK2_STAGE_DEADLINE_DIRECT=23
 TRACK2_DRY_RUN=true
 RUN_CHECKS=true
 MODEL_PROXY_URL=https://track2-fireworks-proxy.proxide-track2.workers.dev
@@ -246,7 +245,7 @@ FIREWORKS_MODEL=accounts/fireworks/models/kimi-k2p6
 FIREWORKS_CAPTION_MODEL=accounts/fireworks/models/kimi-k2p6
 FIREWORKS_CAPTION_MAX_TOKENS=800
 FIREWORKS_CREATIVE_TEMPERATURE=0.45
-FIREWORKS_MAX_RETRIES=1
+FIREWORKS_MAX_RETRIES=0
 FIREWORKS_REQUEST_TIMEOUT_SECONDS=28
 ```
 
@@ -255,20 +254,20 @@ Recommended final settings:
 ```text
 RUN_CHECKS=false
 TRACK2_FRAME_PROFILE=hybrid
-TRACK2_MAX_FRAMES=5
+TRACK2_MAX_FRAMES=4
 TRACK2_MODEL_CALL_RESERVE_SECONDS=75
-TRACK2_ENABLE_STYLE_RETRY=true
+TRACK2_ENABLE_STYLE_RETRY=false
 TRACK2_PER_CLIP_DEADLINE_SECONDS=28
-TRACK2_CANDIDATE_COUNT=3
-FIREWORKS_CAPTION_MAX_TOKENS=800
-FIREWORKS_CREATIVE_TEMPERATURE=0.45
-FIREWORKS_MAX_RETRIES=1
+TRACK2_STAGE_DEADLINE_DIRECT=23
+FIREWORKS_CAPTION_MAX_TOKENS=500
+FIREWORKS_CREATIVE_TEMPERATURE=0.2
+FIREWORKS_MAX_RETRIES=0
 FIREWORKS_REQUEST_TIMEOUT_SECONDS=28
 ```
 
 ## Prompt Tuning
 
-The production factual prompt and four style prompts live under `prompts/`. `track2_captioner/caption_pipeline.py` loads them into the three-call pipeline and uses Fireworks-supported JSON schemas for evidence, candidate, selector, and check outputs.
+The production direct-caption prompt lives in `track2_captioner/caption_pipeline.py`. It instructs Kimi to ground a shared factual nucleus from four chronological frames, then render that same evidence in every requested style. A dynamic Fireworks-supported JSON schema requires exactly the requested style keys.
 
 ## Security
 
@@ -304,8 +303,8 @@ The Fireworks API key is stored as a Cloudflare Worker secret.
 - No hardcoded sample answers
 - Fireworks key is not exposed
 
-## Known Issues
+## Accuracy Notes
 
-- Gemma deployment currently fails with `payment method is required`.
-- This version assumes `qwen3p7-plus` accepts image inputs on the configured Fireworks endpoint.
-- Humor prompts can still invent small details; prompt tuning should focus on reducing hallucination.
+- Ordered frames can establish broad temporal change, but four samples cannot prove every event between timestamps.
+- The prompt therefore forbids unsupported intent, causality, dialogue, and off-screen events.
+- Humor changes framing only; visible subjects, setting, and action must remain consistent across all styles.

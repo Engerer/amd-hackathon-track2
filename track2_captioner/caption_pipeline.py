@@ -177,6 +177,23 @@ SELECTOR_ALL_STYLES_SYSTEM = (
     "- Return strict JSON with a single key 'selected_captions' containing the chosen caption for each style."
 )
 
+DIRECT_CAPTION_SYSTEM = (
+    "You are an accuracy-first video captioner. Infer the video only from four sparse, "
+    "chronologically ordered frames and their timestamps. Write a short literal grounding "
+    "clause naming the visible subject, clearest visible action, and setting. Every caption "
+    "must explicitly restate that same grounding; a joke may follow it but may never replace "
+    "it. Sparse frames do not prove continuous action between timestamps. Never invent or "
+    "infer identity, intent, emotion, causality, dialogue, goals, exact quantities, off-screen "
+    "events, or details too small to verify. Mention a change or sequence only when multiple "
+    "ordered frames clearly support it. Each caption is one concise English sentence. formal "
+    "is objective and professional. sarcastic states the grounded fact with a dry, lightly "
+    "mocking aside about the visible situation, never a fictional motive. humorous_tech states "
+    "the grounded fact and adds a natural programming or technology analogy. "
+    "humorous_non_tech states the grounded fact and adds everyday humor with no technology "
+    "jargon. Figurative language cannot add a new factual claim. Return only the "
+    "schema-conforming JSON object."
+)
+
 # ---------------------------------------------------------------------------
 # Style word lists for validation checks
 # ---------------------------------------------------------------------------
@@ -223,13 +240,13 @@ DRY_RUN_CAPTIONS = {
 
 
 class CaptionPipeline:
-    """Three-call video captioning pipeline targeting Kimi K2.6.
+    """Single-call video captioning pipeline targeting Kimi K2.6.
 
     Flow:
-      1. Deliberate 5-frame selection with perceptual hash deduplication.
-      2. Call 1 (Multimodal): Extract factual evidence ledger with frame references from 5 pristine frames.
-      3. Call 2 (Text): Generate 1-3 candidates for all requested styles in one call.
-      4. Call 3 (Multimodal Selector): Single multimodal call evaluating candidates against the 5 pristine frames and selecting best captions.
+      1. Select four timeline anchors, replacing one interior anchor with a salient
+         motion frame when that adds useful evidence.
+      2. Make one schema-constrained multimodal call that grounds and writes all
+         requested styles directly from the four pristine frames.
     """
 
     def __init__(
@@ -237,14 +254,14 @@ class CaptionPipeline:
         settings: Settings,
         work_dir: Path,
         dry_run: bool = False,
-        max_frames: int = 5,
+        max_frames: int = 4,
         run_checks: bool = True,
         enable_style_retry: bool = True,
     ) -> None:
         self.settings = settings
         self.work_dir = work_dir
         self.dry_run = dry_run
-        self.max_frames = 5  # Strict cap of 5 frames
+        self.max_frames = 4
         self.run_checks = run_checks
         self.enable_style_retry = enable_style_retry
         self.client = None if dry_run else FireworksClient(
@@ -278,17 +295,18 @@ class CaptionPipeline:
 
         should_fallback = force_fallback_captions or (time.monotonic() >= caption_fallback_deadline)
 
-        # --- Stage 1: Deliberate pristine frame extraction ---
+        # --- Stage 1: Four-frame visual coverage ---
         frame_started_at = time.monotonic()
         frames: list[Path] = []
         video_duration = None if self.dry_run else probe_duration_seconds(asset.path)
 
         if not should_fallback:
-            # We strictly request 5 frames
+            # Four images performed best in leaderboard observations and leave
+            # Kimi enough visual context without diluting attention.
             frames = [] if self.dry_run else extract_frames(
                 asset.path,
                 frame_dir,
-                5,
+                4,
                 frame_profile=frame_profile,
             )
         timings["frame_extraction_sec"] = time.monotonic() - frame_started_at
@@ -298,7 +316,7 @@ class CaptionPipeline:
         if remaining_time < 1.5:
             should_fallback = True
 
-        # --- Stage 2: 3-Call Core Architecture ---
+        # --- Stage 2: one direct multimodal caption call ---
         caption_started_at = time.monotonic()
         if should_fallback or not frames:
             evidence = dict(EMPTY_EVIDENCE)
@@ -307,56 +325,38 @@ class CaptionPipeline:
                 for style in requested_styles
             }
         else:
-            # Call 1: Multimodal Evidence Extraction
+            evidence = {
+                "summary": "Captions generated directly from four ordered video frames.",
+                "setting": "",
+                "subjects": [],
+                "objects": [],
+                "actions": [],
+                "claims": [],
+                "uncertainties": [],
+            }
             try:
-                evidence = self._extract_evidence(
+                captions = self._caption_four_frames_direct(
                     asset=asset,
                     keyframes=frames,
                     video_duration=video_duration,
+                    styles=requested_styles,
                     clip_deadline=caption_fallback_deadline,
                 )
             except Exception as exc:
-                logger.error(f"Call 1 (Evidence Extraction) failed: {exc}")
+                logger.error("Direct multimodal caption call failed: %s", exc)
                 evidence = dict(EMPTY_EVIDENCE)
-
-            timings["evidence_extraction_sec"] = time.monotonic() - caption_started_at
-
-            # Calls 2 and 3: batched candidate generation and multimodal selection
-            remaining_time = caption_fallback_deadline - time.monotonic()
-            if remaining_time < 1.5:
                 captions = {
                     style: self._fallback_caption(style, evidence)
                     for style in requested_styles
                 }
-            else:
-                do_retry = self.enable_style_retry if enable_style_retry is None else enable_style_retry
-                captions = self._generate_and_select_captions(
-                    evidence,
-                    frames,
-                    requested_styles,
-                    do_retry,
-                    caption_fallback_deadline,
-                )
-
-            timings["caption_generation_sec"] = time.monotonic() - (caption_started_at + timings.get("evidence_extraction_sec", 0.0))
+            timings["direct_caption_sec"] = time.monotonic() - caption_started_at
+            timings["evidence_extraction_sec"] = 0.0
+            timings["caption_generation_sec"] = timings["direct_caption_sec"]
 
         timings["total_caption_sec"] = time.monotonic() - caption_started_at
 
-        # --- Stage 4: Continuous Quality checks ---
+        # Extra judge/repair calls are deliberately disabled in single-call mode.
         checks = {}
-        if (
-            self.run_checks
-            and not should_fallback
-            and caption_fallback_deadline - time.monotonic() > 1.0
-        ):
-            check_started_at = time.monotonic()
-            checks = self._run_checks_concurrent(
-                requested_styles,
-                evidence,
-                captions,
-                deadline=caption_fallback_deadline,
-            )
-            timings["quality_check_sec"] = time.monotonic() - check_started_at
 
         timings["total_process_sec"] = time.monotonic() - started_at
 
@@ -369,13 +369,111 @@ class CaptionPipeline:
             "crop_frame_count": 0,
             "motion_frame_count": 0,
             "duration_seconds": video_duration,
-            "sampling_strategy": "deliberate_5_frame",
+            "sampling_strategy": "direct_4_frame_single_call",
             "evidence": evidence,
             "observations": evidence,
             "captions": captions,
             "checks": checks,
             "timings": timings,
         }
+
+    def _caption_four_frames_direct(
+        self,
+        asset: VideoAsset,
+        keyframes: list[Path],
+        video_duration: float | None,
+        styles: list[str],
+        clip_deadline: float,
+    ) -> dict[str, str]:
+        """Generate all requested styles in exactly one multimodal model call."""
+        assert self.client is not None
+        if len(keyframes) != 4:
+            raise ValueError(f"Direct captioning requires exactly four frames, got {len(keyframes)}.")
+
+        timestamps = [
+            round(self._frame_timestamp(frame, index, 4, video_duration), 3)
+            for index, frame in enumerate(keyframes)
+        ]
+        style_descriptions = {
+            "formal": "professional, objective, factual",
+            "sarcastic": "dry, ironic, lightly mocking",
+            "humorous_tech": "funny with a natural technology or programming reference",
+            "humorous_non_tech": "funny everyday humor with no technical jargon",
+        }
+        content: list[dict[str, Any]] = [{
+            "type": "text",
+            "text": json.dumps({
+                "task": "Caption this video directly from the four chronological frames.",
+                "video_duration_seconds": round(video_duration, 3) if video_duration else None,
+                "frame_timestamps_seconds": timestamps,
+                "requested_styles": {
+                    style: style_descriptions[style]
+                    for style in styles
+                },
+                "output_rules": [
+                    "one sentence per requested style",
+                    "12-30 words per caption when practical",
+                    "begin every caption with a literal subject-action-setting clause",
+                    "keep the same verified subject, setting, and action across styles",
+                    "put any joke after the grounded visual fact",
+                    "do not state exact counts, motives, emotions, or unseen outcomes",
+                ],
+            }, separators=(",", ":")),
+        }]
+        for index, frame in enumerate(keyframes):
+            content.append({
+                "type": "text",
+                "text": f"Frame {index + 1}/4 at {self._format_timestamp(timestamps[index])}",
+            })
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": image_to_data_url(frame)},
+            })
+
+        caption_properties = {style: {"type": "string"} for style in styles}
+        schema = {
+            "type": "object",
+            "properties": {
+                "grounding": {"type": "string"},
+                **caption_properties,
+            },
+            "required": ["grounding", *styles],
+            "additionalProperties": False,
+        }
+        remaining = clip_deadline - time.monotonic()
+        timeout = min(
+            max(0.5, remaining - 0.25),
+            getattr(self.settings, "stage_deadline_direct", 23.0),
+        )
+        response = self.client.chat(
+            self.settings.model,
+            [
+                {"role": "system", "content": DIRECT_CAPTION_SYSTEM},
+                {"role": "user", "content": content},
+            ],
+            max_tokens=min(self.settings.caption_max_tokens, 500),
+            temperature=self.settings.temperature,
+            reasoning_effort=self.settings.reasoning_effort,
+            json_schema=schema,
+            timeout_seconds=timeout,
+        )
+        parsed = parse_json_object(response)
+        # Some OpenAI-compatible proxies preserve the constrained fields but
+        # flatten the single object wrapper. Accept both shapes locally without
+        # spending a second model call on JSON repair.
+        raw_captions = (
+            parsed.get("captions")
+            or parsed.get("selected_captions")
+            or parsed.get("captions_by_style")
+        )
+        if not isinstance(raw_captions, dict) and all(style in parsed for style in styles):
+            raw_captions = parsed
+        if not isinstance(raw_captions, dict):
+            raise ValueError(
+                "Direct caption response did not contain requested styles; "
+                f"received keys={sorted(parsed)}."
+            )
+        return self._sanitize_caption_map(styles, raw_captions, evidence={})
 
     # ======================================================================
     # Call 1: Multimodal Evidence Extraction

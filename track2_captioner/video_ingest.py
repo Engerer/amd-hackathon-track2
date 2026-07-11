@@ -17,8 +17,8 @@ VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
 MIN_VIDEO_DURATION_SECONDS = 30.0
 MAX_VIDEO_DURATION_SECONDS = 120.0
 DURATION_TOLERANCE_SECONDS = 0.5
-ABSOLUTE_MAX_FRAMES = 5
-DEFAULT_MAX_FRAMES = 5
+ABSOLUTE_MAX_FRAMES = 4
+DEFAULT_MAX_FRAMES = 4
 DEFAULT_FRAME_PROFILE = "hybrid"
 FAST_FRAME_PROFILES = {"fast", "storyboard"}
 HYBRID_FRAME_PROFILES = {"hybrid", "accuracy"}
@@ -257,7 +257,7 @@ def compute_dynamic_frame_count(
         return cap
     profile = (frame_profile or DEFAULT_FRAME_PROFILE).lower()
     if profile in FAST_FRAME_PROFILES or profile in HYBRID_FRAME_PROFILES:
-        return min(5, cap)
+        return min(4, cap)
     if profile != "balanced":
         return cap
     if duration_seconds <= 45:
@@ -380,13 +380,13 @@ def _select_adaptive_candidates(
     duration: float,
     final_count: int,
 ) -> list[FrameCandidate]:
-    """Select temporal anchors plus two visually diverse salient frames.
+    """Select three temporal anchors plus one visually diverse salient frame.
 
     Beginning, middle, and end coverage is mandatory even when the frames look
-    similar. Perceptual deduplication is applied only to the two salience slots;
+    similar. Perceptual deduplication is applied only to the salience slot;
     otherwise static-camera videos can lose their entire second half.
     """
-    final_count = min(final_count, 5)
+    final_count = min(final_count, 4)
     if not candidates:
         return []
 

@@ -29,7 +29,7 @@ from track2_captioner.video_ingest import (
 
 class AccuracyPipelineTests(unittest.TestCase):
     def test_fast_profile_preserves_all_timeline_frames(self) -> None:
-        expected = [Path(f"frame_{index:03d}.jpg") for index in range(1, 6)]
+        expected = [Path(f"frame_{index:03d}.jpg") for index in range(1, 5)]
         with (
             patch("track2_captioner.video_ingest.probe_duration_seconds", return_value=60.0),
             patch("track2_captioner.video_ingest._extract_timestamp_frames_opencv", return_value=expected),
@@ -37,10 +37,10 @@ class AccuracyPipelineTests(unittest.TestCase):
             actual = extract_frames(Path("video.mp4"), Path("frames"), 15, frame_profile="fast")
         self.assertEqual(actual, expected)
 
-    def test_hybrid_budget_is_five_for_every_challenge_duration(self) -> None:
+    def test_hybrid_budget_is_four_for_every_challenge_duration(self) -> None:
         for duration in (30.0, 60.0, 90.0, 120.0):
             with self.subTest(duration=duration):
-                self.assertEqual(compute_dynamic_frame_count(duration, 20, "hybrid"), 5)
+                self.assertEqual(compute_dynamic_frame_count(duration, 20, "hybrid"), 4)
 
     def test_hybrid_selector_returns_full_budget_with_timeline_coverage(self) -> None:
         candidates = [
@@ -54,8 +54,8 @@ class AccuracyPipelineTests(unittest.TestCase):
             )
             for index in range(30)
         ]
-        selected = _select_adaptive_candidates(candidates, duration=116.0, final_count=5)
-        self.assertEqual(len(selected), 5)
+        selected = _select_adaptive_candidates(candidates, duration=116.0, final_count=4)
+        self.assertEqual(len(selected), 4)
         self.assertLessEqual(selected[0].timestamp, 10.0)
         self.assertGreaterEqual(selected[-1].timestamp, 106.0)
 
@@ -71,8 +71,8 @@ class AccuracyPipelineTests(unittest.TestCase):
             )
             for index in range(30)
         ]
-        selected = _select_adaptive_candidates(candidates, duration=116.0, final_count=5)
-        self.assertEqual(len(selected), 5)
+        selected = _select_adaptive_candidates(candidates, duration=116.0, final_count=4)
+        self.assertEqual(len(selected), 4)
         self.assertLessEqual(selected[0].timestamp, 10.0)
         self.assertGreaterEqual(selected[-1].timestamp, 106.0)
 
@@ -198,6 +198,107 @@ class AccuracyPipelineTests(unittest.TestCase):
         self.assertNotIn("minItems", schema_text)
         self.assertNotIn("maxItems", schema_text)
         self.assertEqual(set(result), {"formal", "sarcastic"})
+
+    def test_direct_caption_uses_four_images_and_exactly_one_call(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            def chat(self, model, messages, **kwargs):
+                self.calls.append({"model": model, "messages": messages, "kwargs": kwargs})
+                # The competition proxy can flatten a single object wrapper
+                # even when the upstream response is schema constrained.
+                return json.dumps({
+                    "grounding": "A cyclist rides along a tree-lined road.",
+                    "formal": "A cyclist rides along a road beside green trees.",
+                    "sarcastic": "A cyclist pedals down the road, because apparently arriving without effort would be far too convenient.",
+                    "humorous_tech": "A cyclist runs the two-wheel transport protocol along a tree-lined road with impressively low latency.",
+                    "humorous_non_tech": "A cyclist cruises past the trees while the bicycle quietly does all the legwork, except for the legs.",
+                })
+
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            frames: list[Path] = []
+            for index, timestamp in enumerate((3.0, 35.0, 70.0, 112.0)):
+                frame_path = temp_dir / f"frame_{index:03d}_t{timestamp:09.3f}.jpg"
+                Image.new("RGB", (32, 18), (40 + index, 80, 120)).save(frame_path)
+                frames.append(frame_path)
+
+            pipeline = object.__new__(CaptionPipeline)
+            pipeline.dry_run = False
+            pipeline.client = FakeClient()
+            pipeline.settings = Settings(
+                api_key="", model="kimi", caption_model="kimi", judge_model="kimi",
+            )
+            captions = pipeline._caption_four_frames_direct(
+                VideoAsset("sample", Path("video.mp4")),
+                frames,
+                120.0,
+                DEFAULT_STYLES,
+                time.monotonic() + 10.0,
+            )
+
+        self.assertEqual(set(captions), set(DEFAULT_STYLES))
+        self.assertEqual(len(pipeline.client.calls), 1)
+        call = pipeline.client.calls[0]
+        image_parts = [
+            part
+            for part in call["messages"][1]["content"]
+            if part.get("type") == "image_url"
+        ]
+        self.assertEqual(len(image_parts), 4)
+        self.assertEqual(
+            call["kwargs"]["json_schema"]["required"],
+            ["grounding", *DEFAULT_STYLES],
+        )
+
+    def test_production_process_cannot_add_judge_or_repair_calls(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def chat(self, model, messages, **kwargs):
+                self.calls += 1
+                return json.dumps({
+                    "grounding": "A person walks along a city street.",
+                    "formal": "A person walks along a city street.",
+                    "sarcastic": "A person walks along a city street, because apparently the sidewalk needed supervision.",
+                    "humorous_tech": "A person walks along a city street like a navigation process executing without errors.",
+                    "humorous_non_tech": "A person walks along a city street, giving the pavement its daily inspection.",
+                })
+
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            frames = []
+            for index in range(4):
+                frame_path = temp_dir / f"frame_{index:03d}_t{index * 10:09.3f}.jpg"
+                Image.new("RGB", (32, 18), (50 + index, 90, 130)).save(frame_path)
+                frames.append(frame_path)
+
+            pipeline = object.__new__(CaptionPipeline)
+            pipeline.settings = Settings(
+                api_key="", model="kimi", caption_model="kimi", judge_model="kimi",
+            )
+            pipeline.work_dir = temp_dir / "work"
+            pipeline.dry_run = False
+            pipeline.max_frames = 4
+            pipeline.run_checks = True
+            pipeline.enable_style_retry = True
+            pipeline.client = FakeClient()
+            with (
+                patch("track2_captioner.caption_pipeline.probe_duration_seconds", return_value=60.0),
+                patch("track2_captioner.caption_pipeline.extract_frames", return_value=frames),
+            ):
+                result = pipeline.process(
+                    VideoAsset("sample", Path("video.mp4")),
+                    styles=DEFAULT_STYLES,
+                    caption_fallback_deadline=time.monotonic() + 10.0,
+                )
+
+        self.assertEqual(pipeline.client.calls, 1)
+        self.assertEqual(result["frame_count"], 4)
+        self.assertEqual(result["sampling_strategy"], "direct_4_frame_single_call")
+        self.assertEqual(set(result["captions"]), set(DEFAULT_STYLES))
 
     def test_fallbacks_cover_every_style_with_distinct_tones(self) -> None:
         captions = fallback_captions(DEFAULT_STYLES)
