@@ -253,18 +253,7 @@ def compute_dynamic_frame_count(
 ) -> int:
     """Scale frame count by video duration while preserving enough evidence for judging."""
     cap = min(max_frames, ABSOLUTE_MAX_FRAMES)
-    if duration_seconds is None or duration_seconds <= 0:
-        return cap
-    profile = (frame_profile or DEFAULT_FRAME_PROFILE).lower()
-    if profile in FAST_FRAME_PROFILES or profile in HYBRID_FRAME_PROFILES:
-        return min(4, cap)
-    if profile != "balanced":
-        return cap
-    if duration_seconds <= 45:
-        return min(14, cap)
-    if duration_seconds <= 75:
-        return min(16, cap)
-    return min(18, cap)
+    return cap
 
 
 def _average_hash(image_path: Path, hash_size: int = 8) -> int:
@@ -358,10 +347,10 @@ def _compute_candidate_count(
     profile = (frame_profile or DEFAULT_FRAME_PROFILE).lower()
     if profile in HYBRID_FRAME_PROFILES:
         duration_candidates = math.ceil(duration * 0.3) if duration and duration > 0 else 0
-        return min(42, max(final_count * 2, duration_candidates))
+        return min(80, max(final_count * 2, duration_candidates))
     if duration is None or duration <= 0:
-        return min(72, max(final_count * 4, 48))
-    return min(72, max(final_count * 4, math.ceil(duration * 0.5)))
+        return min(120, max(final_count * 4, 48))
+    return min(120, max(final_count * 4, math.ceil(duration * 0.5)))
 
 
 def _closest_candidate(candidates: list[FrameCandidate], timestamp: float) -> FrameCandidate | None:
@@ -380,23 +369,14 @@ def _select_adaptive_candidates(
     duration: float,
     final_count: int,
 ) -> list[FrameCandidate]:
-    """Select three temporal anchors plus one visually diverse salient frame.
-
-    Beginning, middle, and end coverage is mandatory even when the frames look
-    similar. Perceptual deduplication is applied only to the salience slot;
-    otherwise static-camera videos can lose their entire second half.
+    """Select final_count uniformly spaced frames across the timeline,
+    enforcing temporal coverage and using perceptual hashing to avoid duplicates
+    if multiple candidates exist for the same target timestamp.
     """
-    final_count = min(final_count, 4)
     if not candidates:
         return []
 
     selected: list[FrameCandidate] = []
-
-    def add_anchor(target: float) -> None:
-        for candidate in sorted(candidates, key=lambda item: abs(item.timestamp - target)):
-            if candidate not in selected:
-                selected.append(candidate)
-                return
 
     def is_duplicate(cand: FrameCandidate) -> bool:
         for s in selected:
@@ -404,36 +384,35 @@ def _select_adaptive_candidates(
                 return True
         return False
 
-    # Preserve broad temporal coverage unconditionally.
-    add_anchor(0.05 * duration)
-    if final_count >= 2:
-        add_anchor(0.50 * duration)
-    if final_count >= 3:
-        add_anchor(0.95 * duration)
+    start = 0.05 * duration
+    end = 0.95 * duration
+    for i in range(final_count):
+        if final_count > 1:
+            target_ts = start + (end - start) * (i / (final_count - 1))
+        else:
+            target_ts = duration / 2.0
 
-    # Add the strongest motion/transition candidate that contributes a new view.
-    for c in sorted(candidates, key=lambda c: c.motion, reverse=True):
-        if len(selected) >= final_count:
-            break
-        if c not in selected and not is_duplicate(c):
-            selected.append(c)
-            break
+        sorted_by_dist = sorted(candidates, key=lambda c: abs(c.timestamp - target_ts))
+        for c in sorted_by_dist:
+            if not is_duplicate(c):
+                selected.append(c)
+                break
 
-    # Add the strongest sharp/action/detail candidate that contributes a new view.
-    for c in sorted(candidates, key=lambda c: c.score, reverse=True):
-        if len(selected) >= final_count:
-            break
-        if c not in selected and not is_duplicate(c):
-            selected.append(c)
-            break
-
-    # Fill any remaining slot without sacrificing the mandatory anchors.
+    # Fallback: if deduplication was too strict, backfill with remaining closest candidates
     if len(selected) < final_count:
-        for c in sorted(candidates, key=lambda c: c.score, reverse=True):
+        for i in range(final_count):
             if len(selected) >= final_count:
                 break
-            if c not in selected:
-                selected.append(c)
+            if final_count > 1:
+                target_ts = start + (end - start) * (i / (final_count - 1))
+            else:
+                target_ts = duration / 2.0
+
+            sorted_by_dist = sorted(candidates, key=lambda c: abs(c.timestamp - target_ts))
+            for c in sorted_by_dist:
+                if c not in selected:
+                    selected.append(c)
+                    break
 
     return sorted(selected, key=lambda c: c.timestamp)[:final_count]
 
@@ -558,7 +537,7 @@ def extract_frames(
     video_path: Path,
     frame_dir: Path,
     max_frames: int = DEFAULT_MAX_FRAMES,
-    width: int = 896,
+    width: int = 640,
     frame_profile: str = DEFAULT_FRAME_PROFILE,
 ) -> list[Path]:
     frame_dir.mkdir(parents=True, exist_ok=True)
