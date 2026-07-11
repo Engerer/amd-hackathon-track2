@@ -21,12 +21,12 @@ class Settings:
     proxy_token: str = ""
     # --- Generation parameters ---
     temperature: float = 0.2
-    creative_temperature: float = 0.75
+    creative_temperature: float = 0.45
     max_tokens: int = 1200
-    caption_max_tokens: int = 260
+    caption_max_tokens: int = 180
     check_max_tokens: int = 180
     reasoning_effort: str = "none"
-    max_retries: int = 5
+    max_retries: int = 1
 
 
 def load_settings() -> Settings:
@@ -43,7 +43,7 @@ def load_settings() -> Settings:
     )
     caption_model = (
         os.getenv("FIREWORKS_CAPTION_MODEL", "").strip()
-        or "accounts/fireworks/models/glm-5p2"
+        or model
     )
     return Settings(
         api_key=os.getenv("FIREWORKS_API_KEY", ""),
@@ -54,10 +54,10 @@ def load_settings() -> Settings:
         proxy_url=os.getenv("MODEL_PROXY_URL", ""),
         proxy_token=os.getenv("MODEL_PROXY_TOKEN", ""),
         temperature=float(os.getenv("FIREWORKS_TEMPERATURE", "0.2")),
-        creative_temperature=float(os.getenv("FIREWORKS_CREATIVE_TEMPERATURE", "0.75")),
+        creative_temperature=float(os.getenv("FIREWORKS_CREATIVE_TEMPERATURE", "0.45")),
         max_tokens=int(os.getenv("FIREWORKS_MAX_TOKENS", "1200")),
-        caption_max_tokens=int(os.getenv("FIREWORKS_CAPTION_MAX_TOKENS", "260")),
+        caption_max_tokens=int(os.getenv("FIREWORKS_CAPTION_MAX_TOKENS", "180")),
         check_max_tokens=int(os.getenv("FIREWORKS_CHECK_MAX_TOKENS", "180")),
         reasoning_effort=os.getenv("FIREWORKS_REASONING_EFFORT", "none"),
-        max_retries=int(os.getenv("FIREWORKS_MAX_RETRIES", "5")),
+        max_retries=int(os.getenv("FIREWORKS_MAX_RETRIES", "1")),
     )

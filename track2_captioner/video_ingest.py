@@ -14,8 +14,8 @@ VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
 MIN_VIDEO_DURATION_SECONDS = 30.0
 MAX_VIDEO_DURATION_SECONDS = 120.0
 DURATION_TOLERANCE_SECONDS = 0.5
-ABSOLUTE_MAX_FRAMES = 32
-DEFAULT_MAX_FRAMES = ABSOLUTE_MAX_FRAMES
+ABSOLUTE_MAX_FRAMES = 5
+DEFAULT_MAX_FRAMES = 5
 
 
 class VideoDurationError(ValueError):
@@ -26,25 +26,16 @@ class VideoDurationError(ValueError):
 class VideoAsset:
     video_id: str
     path: Path
-    transcript_path: Path | None
 
 
-def discover_videos(input_dir: Path, transcript_dir: Path | None = None) -> list[VideoAsset]:
+def discover_videos(input_dir: Path) -> list[VideoAsset]:
     if not input_dir.exists():
         return []
 
-    transcript_dir = transcript_dir or input_dir.parent / "transcripts"
     assets: list[VideoAsset] = []
     for path in sorted(input_dir.iterdir()):
         if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS:
-            transcript_path = transcript_dir / f"{path.stem}.txt"
-            assets.append(
-                VideoAsset(
-                    video_id=path.stem,
-                    path=path,
-                    transcript_path=transcript_path if transcript_path.exists() else None,
-                )
-            )
+            assets.append(VideoAsset(video_id=path.stem, path=path))
     return assets
 
 
@@ -223,17 +214,8 @@ def _extract_scene_frames(video_path: Path, frame_dir: Path, max_frames: int, wi
 
 
 def compute_dynamic_frame_count(duration_seconds: float | None, max_frames: int) -> int:
-    """Scale frame count by video duration while preserving enough evidence for judging."""
-    cap = min(max_frames, ABSOLUTE_MAX_FRAMES)
-    if duration_seconds is None or duration_seconds <= 0:
-        return cap
-    if duration_seconds <= 30:
-        return min(10, cap)
-    if duration_seconds <= 60:
-        return min(18, cap)
-    if duration_seconds <= 90:
-        return min(24, cap)
-    return cap
+    """Kimi receives exactly five chronological visual samples."""
+    return min(max(1, max_frames), ABSOLUTE_MAX_FRAMES)
 
 
 def _average_hash(image_path: Path, hash_size: int = 8) -> int:
@@ -282,29 +264,23 @@ def deduplicate_frames(frame_paths: list[Path], threshold: int = 6) -> list[Path
     return kept
 
 
-def extract_frames(video_path: Path, frame_dir: Path, max_frames: int = DEFAULT_MAX_FRAMES, width: int = 768) -> list[Path]:
+def extract_frames(video_path: Path, frame_dir: Path, max_frames: int = DEFAULT_MAX_FRAMES, width: int = 896) -> list[Path]:
     frame_dir.mkdir(parents=True, exist_ok=True)
 
     # Dynamic scaling: adapt frame budget to video duration
     duration = probe_duration_seconds(video_path)
     effective_max = compute_dynamic_frame_count(duration, max_frames)
 
-    minimum_frames = max(1, min(effective_max, 3))
     anchor_frames = _extract_anchor_frames(video_path, frame_dir / "anchor", effective_max, width)
-    if len(anchor_frames) >= minimum_frames:
+    if len(anchor_frames) == effective_max:
         return anchor_frames
 
     scene_frames = _extract_scene_frames(video_path, frame_dir / "scene", effective_max, width)
-    minimum_scene_frames = max(3, min(effective_max, effective_max // 2))
-    if len(scene_frames) >= minimum_scene_frames:
-        return deduplicate_frames(scene_frames)
+    if len(scene_frames) == effective_max:
+        return scene_frames
 
     uniform_frames = _extract_uniform_frames(video_path, frame_dir / "uniform", effective_max, width)
-    if uniform_frames:
-        return deduplicate_frames(uniform_frames)
+    if len(uniform_frames) == effective_max:
+        return uniform_frames
 
-    if anchor_frames:
-        return deduplicate_frames(anchor_frames)
-
-    if not uniform_frames:
-        raise RuntimeError(f"Could not extract frames from {video_path}")
+    raise RuntimeError(f"Could not extract exactly {effective_max} frames from {video_path}")

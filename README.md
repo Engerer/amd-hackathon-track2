@@ -23,49 +23,34 @@ https://github.com/nish0203/amd-track2-captioner
 
 ## How It Works
 
-The pipeline samples timeline evidence instead of processing every video frame. By default it extracts evenly spaced anchor frames across the full clip, with a 32-frame safety cap for accuracy and runtime control.
+The pipeline uses exactly five silent, evenly spaced frames covering the beginning, early-middle, middle, late-middle, and end of each clip.
 
 ```text
 video URL
  -> download video
  -> ffprobe checks duration
- -> ffmpeg extracts timeline anchor frames across the full clip
- -> resize each frame to 768px width
- -> Kimi K2.6 creates detailed factual observations from frames
- -> GLM 5.2 writes four style-specific captions from the observations
+ -> ffmpeg extracts exactly five chronological frames across the full clip
+ -> resize each frame to 896px width
+ -> four Kimi K2.6 calls run in parallel, one for each requested style
+ -> every Kimi call receives the same five frames plus its own style system prompt
+ -> the four returned sentences are recombined into the Track 2 captions object
  -> Docker writes /output/results.json
 ```
 
-The first Kimi call receives image frames and creates observations:
-
-```json
-{
-  "summary": "...",
-  "setting": "...",
-  "subjects": ["..."],
-  "key_objects": ["..."],
-  "actions": ["..."],
-  "timeline": ["beginning: ...", "middle: ...", "end: ..."],
-  "visible_text": ["..."],
-  "audio_or_speech": ["..."],
-  "uncertainties": ["..."]
-}
-```
-
-The caption calls use those observations only, so they are cheaper than sending frames again.
+Each style is grounded directly in the same five visual samples. There is no intermediate evidence model, caption model, audio processing, transcript, judge call, or repair call.
 
 ## Defaults
 
 - Vision model: `accounts/fireworks/models/kimi-k2p6`
-- Caption model: `accounts/fireworks/models/glm-5p2`
-- Frame sampling: adaptive timeline anchor frames
-- Frame cap: `32` total frames per video
-- Frame width: `768px`
-- Whisper audio transcription: on by default in Docker with the `tiny` model
+- Caption model: `accounts/fireworks/models/kimi-k2p6`
+- Frame sampling: exactly five chronological timeline anchors
+- Frame cap: `5` total frames per video
+- Frame width: `896px`
+- Audio/transcription: disabled and not installed
 - Internal judge checks: off by default
 - Fireworks key: stored in a Cloudflare Worker secret, not in the repo
 
-Important: `32` is a safety cap, not 32 FPS. A 30-second video gives about 10 frames, and a 2-minute video gives up to 32 frames.
+Important: each of the four parallel Kimi calls receives exactly the same five images, while its system prompt contains the rules for only one target style.
 
 ## Quick Start
 
@@ -133,26 +118,6 @@ $env:TRACK2_OUTPUT="sample_output/results.json"
 .\.venv\Scripts\python -m track2_captioner.harness
 Remove-Item Env:TRACK2_INPUT,Env:TRACK2_OUTPUT
 ```
-
-## Optional Whisper
-
-Whisper can transcribe video audio and pass the transcript into the caption pipeline.
-
-Install optional dependencies:
-
-```powershell
-.\.venv\Scripts\pip install -r requirements-whisper.txt
-```
-
-Enable it for harness runs:
-
-```powershell
-$env:AUTO_TRANSCRIBE="true"
-$env:WHISPER_MODEL="base"
-```
-
-The submitted Docker image installs Whisper and enables `AUTO_TRANSCRIBE=true` with `WHISPER_MODEL=tiny`.
-Videos without an audio stream skip Whisper and continue through the visual caption pipeline.
 
 ## Docker
 
@@ -228,23 +193,19 @@ Example output:
 Useful variables:
 
 ```text
-TRACK2_MAX_FRAMES=32
+TRACK2_MAX_FRAMES=5
 TRACK2_DRY_RUN=true
 RUN_CHECKS=true
-AUTO_TRANSCRIBE=true
-WHISPER_MODEL=tiny
-WHISPER_LANGUAGE=en
 MODEL_PROXY_URL=https://track2-fireworks-proxy.proxide-track2.workers.dev
 FIREWORKS_MODEL=accounts/fireworks/models/kimi-k2p6
-FIREWORKS_CAPTION_MODEL=accounts/fireworks/models/glm-5p2
+FIREWORKS_CAPTION_MODEL=accounts/fireworks/models/kimi-k2p6
 ```
 
 Recommended final settings:
 
 ```text
 RUN_CHECKS=false
-AUTO_TRANSCRIBE=true
-TRACK2_MAX_FRAMES=32
+TRACK2_MAX_FRAMES=5
 ```
 
 ## Prompt Tuning
@@ -294,5 +255,5 @@ The Fireworks API key is stored as a Cloudflare Worker secret.
 ## Known Issues
 
 - Gemma deployment currently fails with `payment method is required`.
-- GLM 5.2 and DeepSeek V4 do not support image input on Fireworks, so they cannot be the main video-understanding model. They can be used after Kimi turns frames into text observations.
+- Kimi K2.6 is used for every caption because all four style calls require direct image grounding.
 - Humor prompts can still invent small details; prompt tuning should focus on reducing hallucination.

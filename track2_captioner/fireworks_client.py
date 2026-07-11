@@ -56,6 +56,7 @@ class FireworksClient:
         temperature: float = 0.2,
         reasoning_effort: str = "none",
         json_mode: bool = False,
+        json_schema: dict[str, Any] | None = None,
     ) -> str:
         import requests
 
@@ -66,7 +67,12 @@ class FireworksClient:
             "max_tokens": max_tokens,
             "reasoning_effort": reasoning_effort,
         }
-        if json_mode:
+        if json_schema is not None:
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {"name": "response", "schema": json_schema},
+            }
+        elif json_mode:
             payload["response_format"] = {"type": "json_object"}
 
         if self.proxy_url:
@@ -106,7 +112,7 @@ class FireworksClient:
                 method="POST",
             )
             try:
-                with urllib.request.urlopen(request, timeout=180) as response:
+                with urllib.request.urlopen(request, timeout=25) as response:
                     response_payload = json.loads(response.read().decode("utf-8"))
                 return self._content_from_payload(response_payload)
             except urllib.error.HTTPError as exc:
@@ -136,7 +142,7 @@ class FireworksClient:
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
             }
-            response = requests.post(url, headers=headers, json=payload, timeout=120)
+            response = requests.post(url, headers=headers, json=payload, timeout=25)
             if response.status_code in RETRY_STATUS_CODES:
                 raise RetryableHTTPError(
                     response.status_code,

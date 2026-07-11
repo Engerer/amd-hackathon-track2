@@ -12,7 +12,6 @@ import requests
 
 from track2_captioner.caption_pipeline import CaptionPipeline
 from track2_captioner.config import load_settings
-from track2_captioner.transcription import transcribe_video
 from track2_captioner.video_ingest import DEFAULT_MAX_FRAMES, VIDEO_EXTENSIONS, VideoAsset
 
 
@@ -68,12 +67,8 @@ def fallback_captions(styles: list[str]) -> dict[str, str]:
 def run_harness(input_path: Path, output_path: Path) -> int:
     settings = load_settings()
     dry_run = truthy(os.getenv("TRACK2_DRY_RUN"))
-    auto_transcribe = truthy(os.getenv("AUTO_TRANSCRIBE"))
-    force_transcribe = truthy(os.getenv("FORCE_TRANSCRIBE"))
     run_checks = truthy(os.getenv("RUN_CHECKS"))
     max_frames = int(os.getenv("TRACK2_MAX_FRAMES", str(DEFAULT_MAX_FRAMES)))
-    whisper_model = os.getenv("WHISPER_MODEL", "base")
-    whisper_language = os.getenv("WHISPER_LANGUAGE", "").strip() or None
 
     tasks = read_tasks(input_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -82,7 +77,6 @@ def run_harness(input_path: Path, output_path: Path) -> int:
     with tempfile.TemporaryDirectory(prefix="track2_harness_") as temp_dir_name:
         temp_dir = Path(temp_dir_name)
         video_dir = temp_dir / "videos"
-        transcript_dir = temp_dir / "transcripts"
         pipeline = CaptionPipeline(
             settings=settings,
             work_dir=temp_dir / "frames",
@@ -99,20 +93,7 @@ def run_harness(input_path: Path, output_path: Path) -> int:
 
             try:
                 video_path = download_video(video_url, video_dir, task_id)
-                asset = VideoAsset(video_id=task_id, path=video_path, transcript_path=None)
-
-                if auto_transcribe:
-                    try:
-                        transcript_path = transcribe_video(
-                            video_path=video_path,
-                            transcript_dir=transcript_dir,
-                            model_name=whisper_model,
-                            language=whisper_language,
-                            force=force_transcribe,
-                        )
-                        asset = VideoAsset(video_id=task_id, path=video_path, transcript_path=transcript_path)
-                    except Exception as exc:
-                        print(f"Task {task_id}: Whisper skipped: {exc}", file=sys.stderr)
+                asset = VideoAsset(video_id=task_id, path=video_path)
 
                 processed = pipeline.process(asset, styles=styles)
                 captions = processed.get("captions", {})
