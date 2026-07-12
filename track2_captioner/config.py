@@ -24,16 +24,16 @@ class Settings:
     temperature: float = 0.2
     creative_temperature: float = 0.45
     max_tokens: int = 1200
-    caption_max_tokens: int = 180
-    selector_max_tokens: int = 300
+    caption_max_tokens: int = 2500
+    selector_max_tokens: int = 3000
     check_max_tokens: int = 180
-    reasoning_effort: str = "none"
+    reasoning_effort: str = "low"
     max_retries: int = 1
 
 
 def load_settings() -> Settings:
     load_dotenv()
-    reasoning_effort = os.getenv("FIREWORKS_REASONING_EFFORT", "none").strip()
+    reasoning_effort = os.getenv("FIREWORKS_REASONING_EFFORT", "low").strip()
     allowed_models = [
         model.strip()
         for model in os.getenv("ALLOWED_MODELS", "").split(",")
@@ -63,8 +63,8 @@ def load_settings() -> Settings:
         temperature=float(os.getenv("FIREWORKS_TEMPERATURE", "0.2")),
         creative_temperature=float(os.getenv("FIREWORKS_CREATIVE_TEMPERATURE", "0.45")),
         max_tokens=int(os.getenv("FIREWORKS_MAX_TOKENS", "1200")),
-        caption_max_tokens=int(os.getenv("FIREWORKS_CAPTION_MAX_TOKENS", "180")),
-        selector_max_tokens=int(os.getenv("FIREWORKS_SELECTOR_MAX_TOKENS", "300")),
+        caption_max_tokens=int(os.getenv("FIREWORKS_CAPTION_MAX_TOKENS", "2500")),
+        selector_max_tokens=int(os.getenv("FIREWORKS_SELECTOR_MAX_TOKENS", "3000")),
         check_max_tokens=int(os.getenv("FIREWORKS_CHECK_MAX_TOKENS", "180")),
         reasoning_effort=reasoning_effort,
         max_retries=int(os.getenv("FIREWORKS_MAX_RETRIES", "1")),

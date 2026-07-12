@@ -50,9 +50,9 @@ Each style is grounded directly in the same three Qwen-selected visual samples. 
 - Frame-selection fallback: local quality and perceptual-diversity scoring, then timeline anchors
 - Frame cap: `3` total frames per video
 - Frame width: `896px`
-- Reasoning: disabled for Qwen and Kimi
-- Selector completion budget: `300` tokens
-- Caption completion budget: `180` tokens
+- Reasoning: enabled at `low` effort for Qwen and Kimi
+- Selector completion budget: `3000` tokens, including reasoning
+- Caption completion budget: `2500` tokens, including reasoning
 - Audio/transcription: disabled and not installed
 - Internal judge checks: off by default
 - Fireworks key: stored in a Cloudflare Worker secret, not in the repo
