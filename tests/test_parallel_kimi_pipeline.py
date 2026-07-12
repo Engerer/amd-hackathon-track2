@@ -41,7 +41,7 @@ class FakeClient:
 class ParallelKimiPipelineTests(unittest.TestCase):
     def make_frames(self, directory: Path) -> list[Path]:
         frames = []
-        for index in range(5):
+        for index in range(3):
             path = directory / f"frame_{index + 1:03d}.jpg"
             Image.new("RGB", (32, 18), (50 + index, 90, 130)).save(path)
             frames.append(path)
@@ -57,14 +57,14 @@ class ParallelKimiPipelineTests(unittest.TestCase):
         )
         pipeline.work_dir = directory / "work"
         pipeline.dry_run = False
-        pipeline.max_frames = 5
+        pipeline.max_frames = 3
         pipeline.run_checks = False
         pipeline.client = FakeClient()
         return pipeline
 
-    def test_frame_budget_is_five(self) -> None:
+    def test_frame_budget_is_three(self) -> None:
         for duration in (30.0, 60.0, 120.0, 240.0):
-            self.assertEqual(compute_dynamic_frame_count(duration, 99), 5)
+            self.assertEqual(compute_dynamic_frame_count(duration, 99), 3)
 
     def test_shared_prompt_allows_reference_style_figurative_humor(self) -> None:
         self.assertIn("representative moment", SHARED_VISUAL_SYSTEM)
@@ -73,7 +73,7 @@ class ParallelKimiPipelineTests(unittest.TestCase):
 
     @patch("track2_captioner.video_ingest._average_hash")
     @patch("track2_captioner.video_ingest._frame_quality")
-    def test_representative_selection_preserves_five_temporal_buckets(
+    def test_representative_selection_preserves_three_temporal_buckets(
         self,
         quality_mock,
         hash_mock,
@@ -82,14 +82,14 @@ class ParallelKimiPipelineTests(unittest.TestCase):
         quality_mock.side_effect = lambda path: float(int(path.stem.rsplit("_", 1)[1]))
         hash_mock.side_effect = lambda path: int(path.stem.rsplit("_", 1)[1])
 
-        selected = select_representative_frames(candidates, frame_count=5)
+        selected = select_representative_frames(candidates, frame_count=3)
 
         self.assertEqual(
             selected,
-            [candidates[4], candidates[9], candidates[14], candidates[19], candidates[24]],
+            [candidates[7], candidates[15], candidates[24]],
         )
 
-    def test_each_style_gets_same_five_frames_and_unique_system_prompt(self) -> None:
+    def test_each_style_gets_same_three_frames_and_unique_system_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as name:
             directory = Path(name)
             pipeline = self.make_pipeline(directory)
@@ -103,7 +103,7 @@ class ParallelKimiPipelineTests(unittest.TestCase):
             self.assertEqual(call["model"], "accounts/fireworks/models/kimi-k2p6")
             systems.add(call["messages"][0]["content"])
             content = call["messages"][1]["content"]
-            self.assertEqual(sum(part.get("type") == "image_url" for part in content), 5)
+            self.assertEqual(sum(part.get("type") == "image_url" for part in content), 3)
             labels = [part["text"] for part in content if part.get("type") == "text"]
             for position in FRAME_POSITIONS:
                 self.assertTrue(any(position in label for label in labels))
@@ -117,7 +117,7 @@ class ParallelKimiPipelineTests(unittest.TestCase):
             with patch("track2_captioner.caption_pipeline.extract_frames", return_value=frames):
                 result = pipeline.process(VideoAsset("sample", Path("video.mp4")), STYLES)
 
-        self.assertEqual(result["frame_count"], 5)
+        self.assertEqual(result["frame_count"], 3)
         self.assertEqual(set(result["captions"]), set(STYLES))
         self.assertEqual(len(pipeline.client.calls), 4)
         self.assertEqual(result["observations"], {})

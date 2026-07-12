@@ -14,12 +14,13 @@ from track2_captioner.video_ingest import DEFAULT_MAX_FRAMES, VideoAsset, extrac
 
 logger = logging.getLogger(__name__)
 
-FRAME_POSITIONS = ["beginning", "early-middle", "middle", "late-middle", "end"]
+FRAME_POSITIONS = ["beginning", "middle", "end"]
 CREATIVE_STYLES = {"sarcastic", "humorous_tech", "humorous_non_tech"}
 
 SHARED_VISUAL_SYSTEM = (
-    "You are an accuracy-first multimodal video captioner. You receive exactly five silent "
-    "representative frames from one video in chronological order. Inspect all five images. "
+    "You are an accuracy-first multimodal video captioner. You receive exactly three silent "
+    "representative frames from one video in chronological order: beginning, middle, and end. "
+    "Inspect all three images. "
     "Internally identify the main subject, setting, primary visible action or state, distinctive "
     "visual details, and uncertain details before composing the caption. Use the sequence to "
     "confirm what is consistently visible, then describe the clearest representative moment; "
@@ -55,7 +56,7 @@ class CaptionPipeline:
         self.settings = settings
         self.work_dir = work_dir
         self.dry_run = dry_run
-        self.max_frames = 5
+        self.max_frames = DEFAULT_MAX_FRAMES
         self.run_checks = False
         self.client = None if dry_run else FireworksClient(
             settings.api_key,
@@ -75,9 +76,11 @@ class CaptionPipeline:
                 selected_styles.append(style)
 
         frame_dir = self.work_dir / asset.video_id
-        frames = [] if self.dry_run else extract_frames(asset.path, frame_dir, 5)
-        if not self.dry_run and len(frames) != 5:
-            raise ValueError(f"Kimi captioning requires exactly five frames, got {len(frames)}.")
+        frames = [] if self.dry_run else extract_frames(asset.path, frame_dir, self.max_frames)
+        if not self.dry_run and len(frames) != self.max_frames:
+            raise ValueError(
+                f"Kimi captioning requires exactly {self.max_frames} frames, got {len(frames)}."
+            )
 
         captions = self._captions(selected_styles, frames)
         return {
@@ -117,15 +120,17 @@ class CaptionPipeline:
 
     def _caption_style(self, style: str, frames: list[Path]) -> str:
         assert self.client is not None
-        if len(frames) != 5:
-            raise ValueError(f"Style call requires exactly five frames, got {len(frames)}.")
+        if len(frames) != self.max_frames:
+            raise ValueError(
+                f"Style call requires exactly {self.max_frames} frames, got {len(frames)}."
+            )
 
         style_prompt = load_prompt(STYLE_PROMPTS[style])
         system_prompt = f"{SHARED_VISUAL_SYSTEM}\n\nTARGET STYLE RULES:\n{style_prompt}"
         content: list[dict[str, Any]] = [{
             "type": "text",
             "text": (
-                f"Generate the {style} caption directly from these five chronological video "
+                f"Generate the {style} caption directly from these three chronological video "
                 "frames. First reason silently about the most representative visible subject, "
                 "action or state, setting, and distinctive detail. Preserve those factual anchors "
                 "while applying the requested tone. Do not output your analysis."
@@ -134,7 +139,10 @@ class CaptionPipeline:
         for index, frame in enumerate(frames):
             content.append({
                 "type": "text",
-                "text": f"Frame {index + 1}/5 - {FRAME_POSITIONS[index]} video sample",
+                "text": (
+                    f"Frame {index + 1}/{self.max_frames} - "
+                    f"{FRAME_POSITIONS[index]} video sample"
+                ),
             })
             content.append({
                 "type": "image_url",

@@ -23,35 +23,35 @@ https://github.com/nish0203/amd-track2-captioner
 
 ## How It Works
 
-The pipeline sends exactly five silent representative frames covering the beginning, early-middle, middle, late-middle, and end of each clip.
+The pipeline sends exactly three silent representative frames covering the beginning, middle, and end of each clip.
 
 ```text
 video URL
  -> download video
  -> ffprobe checks duration
  -> ffmpeg extracts a dense chronological candidate pool across the full clip
- -> five temporal buckets select sharp, well-exposed, visually diverse representative frames
+ -> three temporal buckets select sharp, well-exposed, visually diverse representative frames
  -> resize each frame to 896px width
  -> four Kimi K2.6 calls run in parallel, one for each requested style
- -> every Kimi call receives the same five frames plus its own style system prompt
+ -> every Kimi call receives the same three frames plus its own style system prompt
  -> the four returned sentences are recombined into the Track 2 captions object
  -> Docker writes /output/results.json
 ```
 
-Each style is grounded directly in the same five visual samples. There is no intermediate evidence model, caption model, audio processing, transcript, judge call, or repair call.
+Each style is grounded directly in the same three visual samples. There is no intermediate evidence model, caption model, audio processing, transcript, judge call, or repair call.
 
 ## Defaults
 
 - Vision model: `accounts/fireworks/models/kimi-k2p6`
 - Caption model: `accounts/fireworks/models/kimi-k2p6`
-- Frame sampling: five content-aware representatives selected from 25 chronological candidates
-- Frame cap: `5` total frames per video
+- Frame sampling: three content-aware representatives selected from 25 chronological candidates
+- Frame cap: `3` total frames per video
 - Frame width: `896px`
 - Audio/transcription: disabled and not installed
 - Internal judge checks: off by default
 - Fireworks key: stored in a Cloudflare Worker secret, not in the repo
 
-Important: each of the four parallel Kimi calls receives exactly the same five images, while its system prompt contains the rules for only one target style.
+Important: each of the four parallel Kimi calls receives exactly the same three images, while its system prompt contains the rules for only one target style.
 
 The retired eight-video judging set and a repeatable five-point scoring rubric are in [`benchmarks/`](benchmarks/README.md). Use that set to compare prompt and frame-selection revisions across all 32 clip/style combinations.
 
@@ -196,7 +196,7 @@ Example output:
 Useful variables:
 
 ```text
-TRACK2_MAX_FRAMES=5
+TRACK2_MAX_FRAMES=3
 TRACK2_DRY_RUN=true
 RUN_CHECKS=true
 MODEL_PROXY_URL=https://track2-fireworks-proxy.proxide-track2.workers.dev
@@ -208,7 +208,7 @@ Recommended final settings:
 
 ```text
 RUN_CHECKS=false
-TRACK2_MAX_FRAMES=5
+TRACK2_MAX_FRAMES=3
 ```
 
 ## Prompt Tuning

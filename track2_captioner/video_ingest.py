@@ -15,8 +15,8 @@ VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
 MIN_VIDEO_DURATION_SECONDS = 30.0
 MAX_VIDEO_DURATION_SECONDS = 120.0
 DURATION_TOLERANCE_SECONDS = 0.5
-ABSOLUTE_MAX_FRAMES = 5
-DEFAULT_MAX_FRAMES = 5
+ABSOLUTE_MAX_FRAMES = 3
+DEFAULT_MAX_FRAMES = 3
 REPRESENTATIVE_CANDIDATE_COUNT = 25
 
 
@@ -226,7 +226,7 @@ def _extract_scene_frames(video_path: Path, frame_dir: Path, max_frames: int, wi
 
 
 def compute_dynamic_frame_count(duration_seconds: float | None, max_frames: int) -> int:
-    """Kimi receives exactly five chronological visual samples."""
+    """Kimi receives exactly three chronological visual samples."""
     return min(max(1, max_frames), ABSOLUTE_MAX_FRAMES)
 
 
