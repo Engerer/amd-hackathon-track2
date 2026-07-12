@@ -93,7 +93,7 @@ class ParallelKimiPipelineTests(unittest.TestCase):
         self.assertEqual(call["messages"][0]["content"], QWEN_SELECTOR_SYSTEM)
         content = call["messages"][1]["content"]
         self.assertEqual(sum(part.get("type") == "image_url" for part in content), 25)
-        self.assertEqual(call["kwargs"]["reasoning_effort"], "low")
+        self.assertEqual(call["kwargs"]["reasoning_effort"], "medium")
         self.assertIn("json_schema", call["kwargs"])
 
     def test_qwen_failure_uses_local_quality_selection(self) -> None:
@@ -138,7 +138,7 @@ class ParallelKimiPipelineTests(unittest.TestCase):
         systems = set()
         for call in pipeline.client.calls:
             self.assertEqual(call["model"], "accounts/fireworks/models/kimi-k2p6")
-            self.assertEqual(call["kwargs"]["reasoning_effort"], "low")
+            self.assertEqual(call["kwargs"]["reasoning_effort"], "medium")
             systems.add(call["messages"][0]["content"])
             content = call["messages"][1]["content"]
             self.assertEqual(sum(part.get("type") == "image_url" for part in content), 3)
@@ -167,7 +167,7 @@ class ParallelKimiPipelineTests(unittest.TestCase):
         self.assertEqual(settings.model, "accounts/fireworks/models/kimi-k2p6")
         self.assertEqual(settings.caption_model, settings.model)
         self.assertEqual(settings.selector_model, "accounts/fireworks/models/qwen3p7-plus")
-        self.assertEqual(settings.reasoning_effort, "low")
+        self.assertEqual(settings.reasoning_effort, "medium")
 
 
 if __name__ == "__main__":
