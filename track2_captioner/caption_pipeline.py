@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -17,6 +17,16 @@ logger = logging.getLogger(__name__)
 
 FRAME_POSITIONS = ["beginning", "middle", "end"]
 CREATIVE_STYLES = {"sarcastic", "humorous_tech", "humorous_non_tech"}
+
+QWEN_SELECTOR_SYSTEM = (
+    "You are a video keyframe selection expert. You receive 25 silent frames sampled in "
+    "chronological order from one video. Think carefully about which three frames jointly "
+    "provide the strongest evidence for an accurate caption: the main subject, setting, "
+    "primary action or state, distinctive details, and meaningful temporal change. Select "
+    "exactly one frame from each chronological third (frames 1-8, 9-16, and 17-25). Prefer "
+    "clear, representative, complementary frames and avoid transitions, occlusion, blur, and "
+    "near-duplicates. Return only the required JSON object."
+)
 
 SHARED_VISUAL_SYSTEM = (
     "You are an accuracy-first multimodal video captioner. You receive exactly three silent "
@@ -42,13 +52,6 @@ DRY_RUN_CAPTIONS = {
     "humorous_non_tech": "A sample subject keeps the visible scene moving, giving the moment its daily exercise.",
 }
 
-FALLBACK_CAPTIONS = {
-    "formal": "The video presents visible subjects and activity within the scene.",
-    "sarcastic": "The scene continues with visible activity, because apparently standing still was not an option.",
-    "humorous_tech": "The visible activity keeps running like a process with no scheduled downtime.",
-    "humorous_non_tech": "The scene keeps moving, making sure nobody mistakes it for a quiet afternoon.",
-}
-
 
 class CaptionPipeline:
     """Generate each requested style with an independent parallel Kimi vision call."""
@@ -64,27 +67,17 @@ class CaptionPipeline:
         self.settings = settings
         self.work_dir = work_dir
         self.dry_run = dry_run
-        # Local temporal-bucket selection and the Kimi prompt both require three.
         self.max_frames = DEFAULT_MAX_FRAMES
-        self.run_checks = run_checks
+        self.run_checks = False
         self.client = None if dry_run else FireworksClient(
             settings.api_key,
             settings.base_url,
             settings.proxy_url,
             settings.proxy_token,
-            max_attempts=settings.max_attempts,
+            max_retries=settings.max_retries,
         )
 
-    @staticmethod
-    def _remaining(deadline: float | None) -> float:
-        return float("inf") if deadline is None else deadline - time.monotonic()
-
-    def process(
-        self,
-        asset: VideoAsset,
-        styles: list[str] | None = None,
-        deadline: float | None = None,
-    ) -> dict[str, Any]:
+    def process(self, asset: VideoAsset, styles: list[str] | None = None) -> dict[str, Any]:
         requested = styles or list(STYLE_PROMPTS)
         selected_styles = []
         for style in requested:
@@ -94,25 +87,18 @@ class CaptionPipeline:
                 selected_styles.append(style)
 
         frame_dir = self.work_dir / asset.video_id
-        if not self.dry_run and self._remaining(deadline) < 30.0:
-            logger.warning("Global deadline is near; using task fallbacks for %s.", asset.video_id)
-            frames: list[Path] = []
-        else:
-            frames = [] if self.dry_run else extract_frames(
-                asset.path,
-                frame_dir,
-                self.max_frames,
-            )
-        if (
-            not self.dry_run
-            and self._remaining(deadline) >= 30.0
-            and len(frames) != self.max_frames
-        ):
+        frames = [] if self.dry_run else extract_frames(
+            asset.path,
+            frame_dir,
+            self.max_frames,
+            selector=self._select_frame_indices,
+        )
+        if not self.dry_run and len(frames) != self.max_frames:
             raise ValueError(
                 f"Kimi captioning requires exactly {self.max_frames} frames, got {len(frames)}."
             )
 
-        captions = self._captions(selected_styles, frames, deadline)
+        captions = self._captions(selected_styles, frames)
         return {
             "video_id": asset.video_id,
             "source_path": str(asset.path),
@@ -124,22 +110,72 @@ class CaptionPipeline:
             "checks": {},
         }
 
-    def _captions(
-        self,
-        styles: list[str],
-        frames: list[Path],
-        deadline: float | None = None,
-    ) -> dict[str, str]:
+    def _select_frame_indices(self, candidates: list[Path]) -> list[int]:
+        """Ask Qwen 3.7 Plus to choose one representative frame per temporal third."""
+        assert self.client is not None
+        if len(candidates) != 25:
+            raise ValueError(f"Qwen frame selection requires 25 candidates, got {len(candidates)}.")
+
+        content: list[dict[str, Any]] = [{
+            "type": "text",
+            "text": (
+                "Choose the three frames that best describe the complete video. Return their "
+                "one-based indices in chronological order as selected_indices."
+            ),
+        }]
+        for index, frame in enumerate(candidates, start=1):
+            content.append({"type": "text", "text": f"Candidate frame {index}/25"})
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": image_to_data_url(frame)},
+            })
+
+        response = self.client.chat(
+            self.settings.selector_model,
+            [
+                {"role": "system", "content": QWEN_SELECTOR_SYSTEM},
+                {"role": "user", "content": content},
+            ],
+            max_tokens=self.settings.selector_max_tokens,
+            temperature=0.1,
+            reasoning_effort=self.settings.reasoning_effort,
+            json_schema={
+                "type": "object",
+                "properties": {
+                    "selected_indices": {
+                        "type": "array",
+                        "items": {"type": "integer", "minimum": 1, "maximum": 25},
+                        "minItems": 3,
+                        "maxItems": 3,
+                        "uniqueItems": True,
+                    },
+                },
+                "required": ["selected_indices"],
+                "additionalProperties": False,
+            },
+        )
+        cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", response.strip(), flags=re.IGNORECASE)
+        payload = json.loads(cleaned)
+        one_based = payload.get("selected_indices")
+        if not isinstance(one_based, list) or len(one_based) != self.max_frames:
+            raise ValueError(f"Qwen returned invalid selected_indices: {one_based!r}")
+        if not all(isinstance(index, int) for index in one_based):
+            raise ValueError(f"Qwen returned non-integer frame indices: {one_based!r}")
+
+        ordered = sorted(one_based)
+        if not (1 <= ordered[0] <= 8 and 9 <= ordered[1] <= 16 and 17 <= ordered[2] <= 25):
+            raise ValueError(f"Qwen selection does not cover all temporal thirds: {ordered!r}")
+        return [index - 1 for index in ordered]
+
+    def _captions(self, styles: list[str], frames: list[Path]) -> dict[str, str]:
         if self.dry_run:
             return {style: DRY_RUN_CAPTIONS[style] for style in styles}
-        if self._remaining(deadline) < 30.0 or len(frames) != self.max_frames:
-            return {style: self._fallback_caption(style) for style in styles}
 
         captions: dict[str, str] = {}
         workers = min(4, len(styles))
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="kimi-style") as pool:
             futures = {
-                pool.submit(self._caption_style, style, frames, deadline): style
+                pool.submit(self._caption_style, style, frames): style
                 for style in styles
             }
             for future in as_completed(futures):
@@ -155,15 +191,8 @@ class CaptionPipeline:
             for style in styles
         }
 
-    def _caption_style(
-        self,
-        style: str,
-        frames: list[Path],
-        deadline: float | None = None,
-    ) -> str:
+    def _caption_style(self, style: str, frames: list[Path]) -> str:
         assert self.client is not None
-        if self._remaining(deadline) < 30.0:
-            return self._fallback_caption(style)
         if len(frames) != self.max_frames:
             raise ValueError(
                 f"Style call requires exactly {self.max_frames} frames, got {len(frames)}."
@@ -207,36 +236,24 @@ class CaptionPipeline:
             max_tokens=self.settings.caption_max_tokens,
             temperature=temperature,
             reasoning_effort=self.settings.reasoning_effort,
-            deadline=deadline,
         )
         caption = self._clean_caption(response)
         return caption or self._fallback_caption(style)
 
     @staticmethod
     def _clean_caption(text: str) -> str:
-        cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL)
-        final_markers = list(
-            re.finditer(r"(?:final\s+answer|final)\s*:\s*", cleaned, flags=re.IGNORECASE)
-        )
-        if final_markers:
-            cleaned = cleaned[final_markers[-1].end():]
-        cleaned = cleaned.strip().strip('"').strip()
+        cleaned = text.strip().strip('"').strip()
         cleaned = re.sub(r"^```(?:text)?\s*|\s*```$", "", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"^(?:caption|formal|sarcastic|humorous[_ -]tech|humorous[_ -]non[_ -]tech)\s*:\s*", "", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
-        analysis_phrases = (
-            r"\bthe prompt (?:asks|requires)\b",
-            r"\b(?:i|we) (?:need|should|must) (?:to )?(?:analy[sz]e|reason|describe)\b",
-            r"\b(?:my|the) analysis\b",
-            r"\bas an ai\b",
-            r"\bchain of thought\b",
-        )
-        if any(re.search(pattern, cleaned, flags=re.IGNORECASE) for pattern in analysis_phrases):
-            return ""
-        if len(cleaned) > 400 or len(cleaned.split()) > 70:
-            return ""
         return cleaned
 
     @staticmethod
     def _fallback_caption(style: str) -> str:
-        return FALLBACK_CAPTIONS.get(style, FALLBACK_CAPTIONS["formal"])
+        if style == "formal":
+            return "The video presents visible subjects and activity within the scene."
+        if style == "sarcastic":
+            return "Visible subjects continue their activity, because apparently the scene requires careful supervision."
+        if style == "humorous_tech":
+            return "The visible scene keeps its activity running like a process with no scheduled downtime."
+        return "The visible subjects keep things moving, giving the scene its daily exercise."

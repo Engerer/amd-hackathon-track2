@@ -1,5 +1,5 @@
 const MAX_BODY_CHARS = 28_000_000;
-const MAX_TOKENS = 4000;
+const MAX_TOKENS = 1000;
 const MAX_MESSAGES = 8;
 
 function jsonResponse(body, status = 200) {
@@ -63,13 +63,6 @@ export default {
       max_tokens: Math.min(Number(body.max_tokens || 700), MAX_TOKENS),
       reasoning_effort: body.reasoning_effort || "none",
     };
-    if (
-      body.response_format &&
-      typeof body.response_format === "object" &&
-      !Array.isArray(body.response_format)
-    ) {
-      payload.response_format = body.response_format;
-    }
 
     const baseUrl = (env.FIREWORKS_BASE_URL || "https://api.fireworks.ai/inference/v1").replace(/\/$/, "");
     const fireworksResponse = await fetch(`${baseUrl}/chat/completions`, {

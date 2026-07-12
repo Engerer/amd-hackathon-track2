@@ -11,13 +11,13 @@ from PIL import Image
 from track2_captioner.caption_pipeline import (
     CaptionPipeline,
     FRAME_POSITIONS,
+    QWEN_SELECTOR_SYSTEM,
     SHARED_VISUAL_SYSTEM,
 )
 from track2_captioner.config import Settings, load_settings
 from track2_captioner.video_ingest import (
-    DEFAULT_CANDIDATE_FPS,
     VideoAsset,
-    _extract_candidate_frames,
+    _extract_model_selected_frames,
     compute_dynamic_frame_count,
 )
 
@@ -61,6 +61,7 @@ class ParallelKimiPipelineTests(unittest.TestCase):
             model="accounts/fireworks/models/kimi-k2p6",
             caption_model="accounts/fireworks/models/kimi-k2p6",
             judge_model="unused",
+            selector_model="accounts/fireworks/models/qwen3p7-plus",
         )
         pipeline.work_dir = directory / "work"
         pipeline.dry_run = False
@@ -73,21 +74,57 @@ class ParallelKimiPipelineTests(unittest.TestCase):
         for duration in (30.0, 60.0, 120.0, 240.0):
             self.assertEqual(compute_dynamic_frame_count(duration, 99), 3)
 
-    def test_candidate_pool_uses_two_fps_by_default(self) -> None:
-        with tempfile.TemporaryDirectory() as name:
-            with patch("track2_captioner.video_ingest._run_ffmpeg", return_value=False) as run:
-                self.assertEqual(
-                    _extract_candidate_frames(Path("video.mp4"), Path(name), 896),
-                    [],
-                )
-        command = run.call_args.args[0]
-        self.assertEqual(DEFAULT_CANDIDATE_FPS, 2.0)
-        self.assertIn("fps=2.0,scale=896:-1", command)
-
     def test_shared_prompt_allows_reference_style_figurative_humor(self) -> None:
         self.assertIn("representative moment", SHARED_VISUAL_SYSTEM)
         self.assertIn("figurative personification", SHARED_VISUAL_SYSTEM)
         self.assertIn("at least two concrete visual anchors", SHARED_VISUAL_SYSTEM)
+
+    def test_qwen_selects_one_frame_from_each_temporal_third(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            pipeline = self.make_pipeline(directory)
+            candidates = self.make_frames(directory, 25)
+            selected = pipeline._select_frame_indices(candidates)
+
+        self.assertEqual(selected, [3, 11, 21])
+        self.assertEqual(len(pipeline.client.calls), 1)
+        call = pipeline.client.calls[0]
+        self.assertEqual(call["model"], "accounts/fireworks/models/qwen3p7-plus")
+        self.assertEqual(call["messages"][0]["content"], QWEN_SELECTOR_SYSTEM)
+        content = call["messages"][1]["content"]
+        self.assertEqual(sum(part.get("type") == "image_url" for part in content), 25)
+        self.assertEqual(call["kwargs"]["reasoning_effort"], "none")
+        self.assertIn("json_schema", call["kwargs"])
+
+    def test_qwen_failure_uses_local_quality_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            candidates = self.make_frames(directory, 25)
+            quality_selection = [candidates[2], candidates[12], candidates[22]]
+
+            def failing_selector(_candidates):
+                raise RuntimeError("selector unavailable")
+
+            with (
+                patch(
+                    "track2_captioner.video_ingest._extract_candidate_frames",
+                    return_value=candidates,
+                ),
+                patch(
+                    "track2_captioner.video_ingest.select_quality_frames",
+                    return_value=quality_selection,
+                ) as quality_mock,
+            ):
+                selected = _extract_model_selected_frames(
+                    Path("video.mp4"),
+                    directory / "selection",
+                    3,
+                    896,
+                    failing_selector,
+                )
+
+        self.assertEqual(len(selected), 3)
+        quality_mock.assert_called_once_with(candidates, 3)
 
     def test_each_style_gets_same_three_frames_and_unique_system_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as name:
@@ -101,7 +138,7 @@ class ParallelKimiPipelineTests(unittest.TestCase):
         systems = set()
         for call in pipeline.client.calls:
             self.assertEqual(call["model"], "accounts/fireworks/models/kimi-k2p6")
-            self.assertEqual(call["kwargs"]["reasoning_effort"], "medium")
+            self.assertEqual(call["kwargs"]["reasoning_effort"], "none")
             systems.add(call["messages"][0]["content"])
             content = call["messages"][1]["content"]
             self.assertEqual(sum(part.get("type") == "image_url" for part in content), 3)
@@ -129,7 +166,8 @@ class ParallelKimiPipelineTests(unittest.TestCase):
             settings = load_settings()
         self.assertEqual(settings.model, "accounts/fireworks/models/kimi-k2p6")
         self.assertEqual(settings.caption_model, settings.model)
-        self.assertEqual(settings.reasoning_effort, "medium")
+        self.assertEqual(settings.selector_model, "accounts/fireworks/models/qwen3p7-plus")
+        self.assertEqual(settings.reasoning_effort, "none")
 
 
 if __name__ == "__main__":

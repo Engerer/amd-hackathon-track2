@@ -26,12 +26,12 @@ https://github.com/nish0203/amd-track2-captioner
 The pipeline sends exactly three silent representative frames covering the beginning, middle, and end of each clip.
 
 ```text
-up to two video tasks concurrently
- -> video URL
+video URL
  -> download video
  -> ffprobe checks duration
- -> ffmpeg samples chronological candidates at 2 FPS across the full clip
- -> local sharpness/exposure/contrast/diversity scoring selects one frame per temporal third
+ -> ffmpeg extracts 25 chronological candidate frames across the full clip
+ -> one Qwen 3.7 Plus vision call selects the best frame from each temporal third
+ -> if Qwen fails, local sharpness/exposure/contrast/diversity scoring selects the three frames
  -> resize each frame to 896px width
  -> four Kimi K2.6 calls run in parallel, one for each requested style
  -> every Kimi call receives the same three frames plus its own style system prompt
@@ -39,36 +39,25 @@ up to two video tasks concurrently
  -> Docker writes /output/results.json
 ```
 
-Each style is grounded directly in the same three locally selected visual samples. There is no audio processing, transcript, judge call, or repair call.
-
-The harness preserves input ordering even when the two video workers finish out of
-order. One 540-second runtime budget is shared across all tasks. Below 30 seconds
-it emits conservative style-specific
-fallbacks. This leaves the final minute of the evaluator's 10-minute limit for
-startup, last-resort output completion, and writing valid JSON.
+Each style is grounded directly in the same three Qwen-selected visual samples. There is no audio processing, transcript, judge call, or repair call.
 
 ## Defaults
 
 - Vision model: `accounts/fireworks/models/kimi-k2p6`
 - Caption model: `accounts/fireworks/models/kimi-k2p6`
-- Frame sampling: FFmpeg extracts candidates at `2 FPS`
-- Frame selector: local quality and perceptual-diversity scoring, then timeline anchors
+- Frame selector: `accounts/fireworks/models/qwen3p7-plus`
+- Frame sampling: Qwen selects three representatives from 25 chronological candidates
+- Frame-selection fallback: local quality and perceptual-diversity scoring, then timeline anchors
 - Frame cap: `3` total frames per video
 - Frame width: `896px`
-- Reasoning: enabled at `medium` effort for Kimi
-- Caption completion budget: `4000` tokens, including reasoning
-- Concurrent video tasks: `2` (each retains four parallel style calls)
-- Global processing budget: `540` seconds
-- Model attempts: `2` total; retry only 429, 500/502/503/504, reset connections, and deadline-safe timeouts
+- Reasoning: disabled for Qwen and Kimi
+- Selector completion budget: `300` tokens
+- Caption completion budget: `180` tokens
 - Audio/transcription: disabled and not installed
 - Internal judge checks: off by default
 - Fireworks key: stored in a Cloudflare Worker secret, not in the repo
 
-Important: FFmpeg produces 60-240 candidates for the allowed 30-120 second clips. Selection stays local, and each of the four parallel Kimi calls receives only the same three selected images.
-
-Important: medium reasoning requires the checked-in Cloudflare Worker configuration
-with `MAX_TOKENS = 4000`. Redeploying an older 1,000-token Worker can silently
-exhaust the reasoning budget and break Kimi output.
+Important: Qwen sees all 25 candidates once. Each of the four parallel Kimi calls then receives exactly the same three selected images, while its system prompt contains the rules for only one target style.
 
 The retired eight-video judging set and a repeatable five-point scoring rubric are in [`benchmarks/`](benchmarks/README.md). Use that set to compare prompt and frame-selection revisions across all 32 clip/style combinations.
 
@@ -214,11 +203,8 @@ Useful variables:
 
 ```text
 TRACK2_MAX_FRAMES=3
-TRACK2_TASK_WORKERS=2
-TRACK2_RUNTIME_BUDGET_SECONDS=540
 TRACK2_DRY_RUN=true
 RUN_CHECKS=true
-FIREWORKS_MAX_ATTEMPTS=2
 MODEL_PROXY_URL=https://track2-fireworks-proxy.proxide-track2.workers.dev
 FIREWORKS_MODEL=accounts/fireworks/models/kimi-k2p6
 FIREWORKS_CAPTION_MODEL=accounts/fireworks/models/kimi-k2p6
@@ -229,9 +215,6 @@ Recommended final settings:
 ```text
 RUN_CHECKS=false
 TRACK2_MAX_FRAMES=3
-TRACK2_TASK_WORKERS=2
-TRACK2_RUNTIME_BUDGET_SECONDS=540
-FIREWORKS_MAX_ATTEMPTS=2
 ```
 
 ## Prompt Tuning

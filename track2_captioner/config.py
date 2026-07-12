@@ -16,6 +16,7 @@ class Settings:
     model: str
     caption_model: str
     judge_model: str
+    selector_model: str = "accounts/fireworks/models/qwen3p7-plus"
     base_url: str = "https://api.fireworks.ai/inference/v1"
     proxy_url: str = ""
     proxy_token: str = ""
@@ -23,17 +24,16 @@ class Settings:
     temperature: float = 0.2
     creative_temperature: float = 0.45
     max_tokens: int = 1200
-    caption_max_tokens: int = 4000
+    caption_max_tokens: int = 180
+    selector_max_tokens: int = 300
     check_max_tokens: int = 180
-    reasoning_effort: str = "medium"
-    max_attempts: int = 2
-    task_workers: int = 2
-    runtime_budget_seconds: float = 540.0
+    reasoning_effort: str = "none"
+    max_retries: int = 1
 
 
 def load_settings() -> Settings:
     load_dotenv()
-    reasoning_effort = os.getenv("FIREWORKS_REASONING_EFFORT", "medium").strip()
+    reasoning_effort = os.getenv("FIREWORKS_REASONING_EFFORT", "none").strip()
     allowed_models = [
         model.strip()
         for model in os.getenv("ALLOWED_MODELS", "").split(",")
@@ -53,19 +53,19 @@ def load_settings() -> Settings:
         model=model,
         caption_model=caption_model,
         judge_model=os.getenv("FIREWORKS_JUDGE_MODEL", model),
+        selector_model=os.getenv(
+            "FIREWORKS_SELECTOR_MODEL",
+            "accounts/fireworks/models/qwen3p7-plus",
+        ),
         base_url=os.getenv("FIREWORKS_BASE_URL", "https://api.fireworks.ai/inference/v1"),
         proxy_url=os.getenv("MODEL_PROXY_URL", ""),
         proxy_token=os.getenv("MODEL_PROXY_TOKEN", ""),
         temperature=float(os.getenv("FIREWORKS_TEMPERATURE", "0.2")),
         creative_temperature=float(os.getenv("FIREWORKS_CREATIVE_TEMPERATURE", "0.45")),
         max_tokens=int(os.getenv("FIREWORKS_MAX_TOKENS", "1200")),
-        caption_max_tokens=int(os.getenv("FIREWORKS_CAPTION_MAX_TOKENS", "4000")),
+        caption_max_tokens=int(os.getenv("FIREWORKS_CAPTION_MAX_TOKENS", "180")),
+        selector_max_tokens=int(os.getenv("FIREWORKS_SELECTOR_MAX_TOKENS", "300")),
         check_max_tokens=int(os.getenv("FIREWORKS_CHECK_MAX_TOKENS", "180")),
         reasoning_effort=reasoning_effort,
-        max_attempts=max(1, int(os.getenv("FIREWORKS_MAX_ATTEMPTS", "2"))),
-        task_workers=max(1, int(os.getenv("TRACK2_TASK_WORKERS", "2"))),
-        runtime_budget_seconds=max(
-            0.0,
-            float(os.getenv("TRACK2_RUNTIME_BUDGET_SECONDS", "540")),
-        ),
+        max_retries=int(os.getenv("FIREWORKS_MAX_RETRIES", "1")),
     )
