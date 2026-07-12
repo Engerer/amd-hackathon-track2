@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -16,6 +17,16 @@ logger = logging.getLogger(__name__)
 
 FRAME_POSITIONS = ["beginning", "middle", "end"]
 CREATIVE_STYLES = {"sarcastic", "humorous_tech", "humorous_non_tech"}
+
+QWEN_SELECTOR_SYSTEM = (
+    "You are a video keyframe selection expert. You receive 25 silent frames sampled in "
+    "chronological order from one video. Think carefully about which three frames jointly "
+    "provide the strongest evidence for an accurate caption: the main subject, setting, "
+    "primary action or state, distinctive details, and meaningful temporal change. Select "
+    "exactly one frame from each chronological third (frames 1-8, 9-16, and 17-25). Prefer "
+    "clear, representative, complementary frames and avoid transitions, occlusion, blur, and "
+    "near-duplicates. Return only the required JSON object."
+)
 
 SHARED_VISUAL_SYSTEM = (
     "You are an accuracy-first multimodal video captioner. You receive exactly three silent "
@@ -76,7 +87,12 @@ class CaptionPipeline:
                 selected_styles.append(style)
 
         frame_dir = self.work_dir / asset.video_id
-        frames = [] if self.dry_run else extract_frames(asset.path, frame_dir, self.max_frames)
+        frames = [] if self.dry_run else extract_frames(
+            asset.path,
+            frame_dir,
+            self.max_frames,
+            selector=self._select_frame_indices,
+        )
         if not self.dry_run and len(frames) != self.max_frames:
             raise ValueError(
                 f"Kimi captioning requires exactly {self.max_frames} frames, got {len(frames)}."
@@ -93,6 +109,63 @@ class CaptionPipeline:
             "captions": captions,
             "checks": {},
         }
+
+    def _select_frame_indices(self, candidates: list[Path]) -> list[int]:
+        """Ask Qwen 3.7 Plus to choose one representative frame per temporal third."""
+        assert self.client is not None
+        if len(candidates) != 25:
+            raise ValueError(f"Qwen frame selection requires 25 candidates, got {len(candidates)}.")
+
+        content: list[dict[str, Any]] = [{
+            "type": "text",
+            "text": (
+                "Choose the three frames that best describe the complete video. Return their "
+                "one-based indices in chronological order as selected_indices."
+            ),
+        }]
+        for index, frame in enumerate(candidates, start=1):
+            content.append({"type": "text", "text": f"Candidate frame {index}/25"})
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": image_to_data_url(frame)},
+            })
+
+        response = self.client.chat(
+            self.settings.selector_model,
+            [
+                {"role": "system", "content": QWEN_SELECTOR_SYSTEM},
+                {"role": "user", "content": content},
+            ],
+            max_tokens=self.settings.selector_max_tokens,
+            temperature=0.1,
+            reasoning_effort=self.settings.reasoning_effort,
+            json_schema={
+                "type": "object",
+                "properties": {
+                    "selected_indices": {
+                        "type": "array",
+                        "items": {"type": "integer", "minimum": 1, "maximum": 25},
+                        "minItems": 3,
+                        "maxItems": 3,
+                        "uniqueItems": True,
+                    },
+                },
+                "required": ["selected_indices"],
+                "additionalProperties": False,
+            },
+        )
+        cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", response.strip(), flags=re.IGNORECASE)
+        payload = json.loads(cleaned)
+        one_based = payload.get("selected_indices")
+        if not isinstance(one_based, list) or len(one_based) != self.max_frames:
+            raise ValueError(f"Qwen returned invalid selected_indices: {one_based!r}")
+        if not all(isinstance(index, int) for index in one_based):
+            raise ValueError(f"Qwen returned non-integer frame indices: {one_based!r}")
+
+        ordered = sorted(one_based)
+        if not (1 <= ordered[0] <= 8 and 9 <= ordered[1] <= 16 and 17 <= ordered[2] <= 25):
+            raise ValueError(f"Qwen selection does not cover all temporal thirds: {ordered!r}")
+        return [index - 1 for index in ordered]
 
     def _captions(self, styles: list[str], frames: list[Path]) -> dict[str, str]:
         if self.dry_run:
@@ -155,7 +228,7 @@ class CaptionPipeline:
             else self.settings.temperature
         )
         response = self.client.chat(
-            self.settings.model,
+            self.settings.caption_model,
             [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": content},

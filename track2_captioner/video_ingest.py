@@ -7,6 +7,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 
 logger = logging.getLogger(__name__)
@@ -260,12 +261,12 @@ def _frame_quality(image_path: Path) -> float:
     return math.log1p(edge_variance) + (contrast / 32.0) + exposure
 
 
-def select_representative_frames(
+def select_quality_frames(
     candidate_frames: list[Path],
     frame_count: int = DEFAULT_MAX_FRAMES,
     diversity_threshold: int = 6,
 ) -> list[Path]:
-    """Choose one high-quality, diverse frame from each temporal bucket."""
+    """Choose a strong, diverse frame from each chronological bucket."""
     if frame_count <= 0 or len(candidate_frames) < frame_count:
         return []
 
@@ -273,7 +274,7 @@ def select_representative_frames(
         quality = {path: _frame_quality(path) for path in candidate_frames}
         hashes = {path: _average_hash(path) for path in candidate_frames}
     except Exception:
-        logger.debug("Representative-frame scoring failed.", exc_info=True)
+        logger.warning("Local quality frame scoring failed.", exc_info=True)
         return []
 
     selected: list[Path] = []
@@ -281,8 +282,11 @@ def select_representative_frames(
     for bucket_index in range(frame_count):
         start = (bucket_index * total) // frame_count
         end = ((bucket_index + 1) * total) // frame_count
-        bucket = candidate_frames[start:end]
-        ranked = sorted(bucket, key=lambda path: quality[path], reverse=True)
+        ranked = sorted(
+            candidate_frames[start:end],
+            key=lambda path: quality[path],
+            reverse=True,
+        )
         diverse = [
             path
             for path in ranked
@@ -296,11 +300,12 @@ def select_representative_frames(
     return sorted(selected, key=candidate_frames.index)
 
 
-def _extract_representative_frames(
+def _extract_model_selected_frames(
     video_path: Path,
     frame_dir: Path,
     frame_count: int,
     width: int,
+    selector: Callable[[list[Path]], list[int]],
 ) -> list[Path]:
     candidate_count = max(REPRESENTATIVE_CANDIDATE_COUNT, frame_count * 5)
     candidates = _extract_candidate_frames(
@@ -312,9 +317,26 @@ def _extract_representative_frames(
     if len(candidates) < frame_count:
         return []
 
-    selected = select_representative_frames(candidates, frame_count)
-    if len(selected) != frame_count:
-        return []
+    selected_indices: list[int] = []
+    try:
+        selected_indices = selector(candidates)
+    except Exception:
+        logger.warning("Qwen frame selection failed; using local quality scoring.", exc_info=True)
+
+    valid_model_selection = (
+        len(selected_indices) == frame_count
+        and len(set(selected_indices)) == frame_count
+        and all(0 <= index < len(candidates) for index in selected_indices)
+    )
+    if valid_model_selection:
+        selected = [candidates[index] for index in sorted(selected_indices)]
+    else:
+        if selected_indices:
+            logger.warning("Qwen returned invalid frame indices: %s", selected_indices)
+        selected = select_quality_frames(candidates, frame_count)
+        if len(selected) != frame_count:
+            logger.warning("Local quality selection failed; using timeline fallbacks.")
+            return []
 
     output_dir = frame_dir / "selected"
     _reset_dir(output_dir)
@@ -357,21 +379,29 @@ def deduplicate_frames(frame_paths: list[Path], threshold: int = 6) -> list[Path
     return kept
 
 
-def extract_frames(video_path: Path, frame_dir: Path, max_frames: int = DEFAULT_MAX_FRAMES, width: int = 896) -> list[Path]:
+def extract_frames(
+    video_path: Path,
+    frame_dir: Path,
+    max_frames: int = DEFAULT_MAX_FRAMES,
+    width: int = 896,
+    selector: Callable[[list[Path]], list[int]] | None = None,
+) -> list[Path]:
     frame_dir.mkdir(parents=True, exist_ok=True)
 
     # Dynamic scaling: adapt frame budget to video duration
     duration = probe_duration_seconds(video_path)
     effective_max = compute_dynamic_frame_count(duration, max_frames)
 
-    representative_frames = _extract_representative_frames(
-        video_path,
-        frame_dir / "representative",
-        effective_max,
-        width,
-    )
-    if len(representative_frames) == effective_max:
-        return representative_frames
+    if selector is not None:
+        model_selected_frames = _extract_model_selected_frames(
+            video_path,
+            frame_dir / "qwen_selected",
+            effective_max,
+            width,
+            selector,
+        )
+        if len(model_selected_frames) == effective_max:
+            return model_selected_frames
 
     anchor_frames = _extract_anchor_frames(video_path, frame_dir / "anchor", effective_max, width)
     if len(anchor_frames) == effective_max:
