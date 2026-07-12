@@ -8,9 +8,13 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from track2_captioner.caption_pipeline import CaptionPipeline, FRAME_POSITIONS
+from track2_captioner.caption_pipeline import CaptionPipeline, FRAME_POSITIONS, SHARED_VISUAL_SYSTEM
 from track2_captioner.config import Settings, load_settings
-from track2_captioner.video_ingest import VideoAsset, compute_dynamic_frame_count
+from track2_captioner.video_ingest import (
+    VideoAsset,
+    compute_dynamic_frame_count,
+    select_representative_frames,
+)
 
 
 STYLES = ["formal", "sarcastic", "humorous_tech", "humorous_non_tech"]
@@ -61,6 +65,29 @@ class ParallelKimiPipelineTests(unittest.TestCase):
     def test_frame_budget_is_five(self) -> None:
         for duration in (30.0, 60.0, 120.0, 240.0):
             self.assertEqual(compute_dynamic_frame_count(duration, 99), 5)
+
+    def test_shared_prompt_allows_reference_style_figurative_humor(self) -> None:
+        self.assertIn("representative moment", SHARED_VISUAL_SYSTEM)
+        self.assertIn("figurative personification", SHARED_VISUAL_SYSTEM)
+        self.assertIn("at least two concrete visual anchors", SHARED_VISUAL_SYSTEM)
+
+    @patch("track2_captioner.video_ingest._average_hash")
+    @patch("track2_captioner.video_ingest._frame_quality")
+    def test_representative_selection_preserves_five_temporal_buckets(
+        self,
+        quality_mock,
+        hash_mock,
+    ) -> None:
+        candidates = [Path(f"frame_{index:03d}.jpg") for index in range(1, 26)]
+        quality_mock.side_effect = lambda path: float(int(path.stem.rsplit("_", 1)[1]))
+        hash_mock.side_effect = lambda path: int(path.stem.rsplit("_", 1)[1])
+
+        selected = select_representative_frames(candidates, frame_count=5)
+
+        self.assertEqual(
+            selected,
+            [candidates[4], candidates[9], candidates[14], candidates[19], candidates[24]],
+        )
 
     def test_each_style_gets_same_five_frames_and_unique_system_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as name:

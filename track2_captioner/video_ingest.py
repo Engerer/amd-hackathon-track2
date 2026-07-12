@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -16,6 +17,7 @@ MAX_VIDEO_DURATION_SECONDS = 120.0
 DURATION_TOLERANCE_SECONDS = 0.5
 ABSOLUTE_MAX_FRAMES = 5
 DEFAULT_MAX_FRAMES = 5
+REPRESENTATIVE_CANDIDATE_COUNT = 25
 
 
 class VideoDurationError(ValueError):
@@ -190,6 +192,16 @@ def _extract_uniform_frames(video_path: Path, frame_dir: Path, max_frames: int, 
     return sorted(frame_dir.glob("frame_*.jpg"))
 
 
+def _extract_candidate_frames(
+    video_path: Path,
+    frame_dir: Path,
+    candidate_count: int,
+    width: int,
+) -> list[Path]:
+    """Extract a dense chronological pool for representative-frame selection."""
+    return _extract_uniform_frames(video_path, frame_dir, candidate_count, width)
+
+
 def _extract_scene_frames(video_path: Path, frame_dir: Path, max_frames: int, width: int) -> list[Path]:
     _reset_dir(frame_dir)
     output_pattern = frame_dir / "frame_%03d.jpg"
@@ -233,6 +245,87 @@ def _hamming_distance(hash_a: int, hash_b: int) -> int:
     return bin(hash_a ^ hash_b).count("1")
 
 
+def _frame_quality(image_path: Path) -> float:
+    """Favor sharp, well-exposed, sufficiently contrasted frames."""
+    from PIL import Image, ImageFilter, ImageStat
+
+    with Image.open(image_path) as image:
+        grayscale = image.convert("L").resize((256, 144), Image.Resampling.LANCZOS)
+        statistics = ImageStat.Stat(grayscale)
+        mean = statistics.mean[0]
+        contrast = statistics.stddev[0]
+        edge_variance = ImageStat.Stat(grayscale.filter(ImageFilter.FIND_EDGES)).var[0]
+
+    exposure = max(0.0, 1.0 - (abs(mean - 127.5) / 127.5))
+    return math.log1p(edge_variance) + (contrast / 32.0) + exposure
+
+
+def select_representative_frames(
+    candidate_frames: list[Path],
+    frame_count: int = DEFAULT_MAX_FRAMES,
+    diversity_threshold: int = 6,
+) -> list[Path]:
+    """Choose one high-quality, diverse frame from each temporal bucket."""
+    if frame_count <= 0 or len(candidate_frames) < frame_count:
+        return []
+
+    try:
+        quality = {path: _frame_quality(path) for path in candidate_frames}
+        hashes = {path: _average_hash(path) for path in candidate_frames}
+    except Exception:
+        logger.debug("Representative-frame scoring failed.", exc_info=True)
+        return []
+
+    selected: list[Path] = []
+    total = len(candidate_frames)
+    for bucket_index in range(frame_count):
+        start = (bucket_index * total) // frame_count
+        end = ((bucket_index + 1) * total) // frame_count
+        bucket = candidate_frames[start:end]
+        ranked = sorted(bucket, key=lambda path: quality[path], reverse=True)
+        diverse = [
+            path
+            for path in ranked
+            if all(
+                _hamming_distance(hashes[path], hashes[chosen]) >= diversity_threshold
+                for chosen in selected
+            )
+        ]
+        selected.append((diverse or ranked)[0])
+
+    return sorted(selected, key=candidate_frames.index)
+
+
+def _extract_representative_frames(
+    video_path: Path,
+    frame_dir: Path,
+    frame_count: int,
+    width: int,
+) -> list[Path]:
+    candidate_count = max(REPRESENTATIVE_CANDIDATE_COUNT, frame_count * 5)
+    candidates = _extract_candidate_frames(
+        video_path,
+        frame_dir / "candidates",
+        candidate_count,
+        width,
+    )
+    if len(candidates) < frame_count:
+        return []
+
+    selected = select_representative_frames(candidates, frame_count)
+    if len(selected) != frame_count:
+        return []
+
+    output_dir = frame_dir / "selected"
+    _reset_dir(output_dir)
+    output: list[Path] = []
+    for index, source in enumerate(selected, start=1):
+        destination = output_dir / f"frame_{index:03d}.jpg"
+        shutil.copyfile(source, destination)
+        output.append(destination)
+    return output
+
+
 def deduplicate_frames(frame_paths: list[Path], threshold: int = 6) -> list[Path]:
     """Drop near-duplicate frames using perceptual hashing (average hash).
 
@@ -270,6 +363,15 @@ def extract_frames(video_path: Path, frame_dir: Path, max_frames: int = DEFAULT_
     # Dynamic scaling: adapt frame budget to video duration
     duration = probe_duration_seconds(video_path)
     effective_max = compute_dynamic_frame_count(duration, max_frames)
+
+    representative_frames = _extract_representative_frames(
+        video_path,
+        frame_dir / "representative",
+        effective_max,
+        width,
+    )
+    if len(representative_frames) == effective_max:
+        return representative_frames
 
     anchor_frames = _extract_anchor_frames(video_path, frame_dir / "anchor", effective_max, width)
     if len(anchor_frames) == effective_max:

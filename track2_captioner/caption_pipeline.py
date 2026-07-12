@@ -19,13 +19,18 @@ CREATIVE_STYLES = {"sarcastic", "humorous_tech", "humorous_non_tech"}
 
 SHARED_VISUAL_SYSTEM = (
     "You are an accuracy-first multimodal video captioner. You receive exactly five silent "
-    "frames from one video in chronological order: beginning, early-middle, middle, "
-    "late-middle, and end. Inspect all five images before writing. Ground the caption in the "
-    "clearly visible subject, setting, and primary action or state. Use a broad description "
-    "when a detail is ambiguous. Do not infer audio, speech, identity, intent, emotion, "
-    "causality, exact location, off-screen events, or continuity that sparse frames do not "
-    "prove. Never let humor replace the literal visible event. Output one concise English "
-    "sentence only, with no JSON, label, explanation, markdown, or quotation marks."
+    "representative frames from one video in chronological order. Inspect all five images. "
+    "Internally identify the main subject, setting, primary visible action or state, distinctive "
+    "visual details, and uncertain details before composing the caption. Use the sequence to "
+    "confirm what is consistently visible, then describe the clearest representative moment; "
+    "do not force a beginning-to-end story when the frames only show one stable scene. Include "
+    "at least two concrete visual anchors when supported, such as subject plus action, setting, "
+    "color, object, or environmental detail. Do not make literal claims about audio, speech, "
+    "identity, exact location, causality, off-screen events, or continuity that the frames do "
+    "not prove. In humorous styles, obvious figurative personification, motives, or comparisons "
+    "are allowed as jokes, but they must remain attached to the true visible scene and must not "
+    "replace its factual anchors. Output one concise English caption of one or two sentences, "
+    "with no JSON, label, explanation, markdown, or quotation marks."
 )
 
 DRY_RUN_CAPTIONS = {
@@ -121,8 +126,9 @@ class CaptionPipeline:
             "type": "text",
             "text": (
                 f"Generate the {style} caption directly from these five chronological video "
-                "frames. Preserve the same literal visible event across styles; apply only the "
-                "requested tone. Inspect beginning, middle, and end evidence before answering."
+                "frames. First reason silently about the most representative visible subject, "
+                "action or state, setting, and distinctive detail. Preserve those factual anchors "
+                "while applying the requested tone. Do not output your analysis."
             ),
         }]
         for index, frame in enumerate(frames):
