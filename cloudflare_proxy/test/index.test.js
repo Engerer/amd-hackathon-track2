@@ -24,7 +24,7 @@ test("proxy caps completions at 4000 and forwards response_format", async () => 
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: "accounts/fireworks/models/qwen3p7-plus",
+        model: "accounts/fireworks/models/kimi-k2p6",
         messages: [{ role: "user", content: "select" }],
         max_tokens: 9000,
         response_format: responseFormat,

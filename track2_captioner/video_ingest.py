@@ -7,7 +7,6 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 
 logger = logging.getLogger(__name__)
@@ -18,7 +17,7 @@ MAX_VIDEO_DURATION_SECONDS = 120.0
 DURATION_TOLERANCE_SECONDS = 0.5
 ABSOLUTE_MAX_FRAMES = 3
 DEFAULT_MAX_FRAMES = 3
-REPRESENTATIVE_CANDIDATE_COUNT = 25
+DEFAULT_CANDIDATE_FPS = 2.0
 
 
 class VideoDurationError(ValueError):
@@ -196,11 +195,20 @@ def _extract_uniform_frames(video_path: Path, frame_dir: Path, max_frames: int, 
 def _extract_candidate_frames(
     video_path: Path,
     frame_dir: Path,
-    candidate_count: int,
     width: int,
+    sampling_fps: float = DEFAULT_CANDIDATE_FPS,
 ) -> list[Path]:
-    """Extract a dense chronological pool for representative-frame selection."""
-    return _extract_uniform_frames(video_path, frame_dir, candidate_count, width)
+    """Extract a chronological local-selection pool at the configured FFmpeg FPS."""
+    _reset_dir(frame_dir)
+    output_pattern = frame_dir / "frame_%04d.jpg"
+    command = [
+        "ffmpeg", "-y", "-i", str(video_path),
+        "-vf", f"fps={sampling_fps},scale={width}:-1",
+        "-q:v", "3", str(output_pattern),
+    ]
+    if not _run_ffmpeg(command):
+        return []
+    return sorted(frame_dir.glob("frame_*.jpg"))
 
 
 def _extract_scene_frames(video_path: Path, frame_dir: Path, max_frames: int, width: int) -> list[Path]:
@@ -300,43 +308,26 @@ def select_quality_frames(
     return sorted(selected, key=candidate_frames.index)
 
 
-def _extract_model_selected_frames(
+def _extract_locally_selected_frames(
     video_path: Path,
     frame_dir: Path,
     frame_count: int,
     width: int,
-    selector: Callable[[list[Path]], list[int]],
+    sampling_fps: float = DEFAULT_CANDIDATE_FPS,
 ) -> list[Path]:
-    candidate_count = max(REPRESENTATIVE_CANDIDATE_COUNT, frame_count * 5)
     candidates = _extract_candidate_frames(
         video_path,
         frame_dir / "candidates",
-        candidate_count,
         width,
+        sampling_fps,
     )
     if len(candidates) < frame_count:
         return []
 
-    selected_indices: list[int] = []
-    try:
-        selected_indices = selector(candidates)
-    except Exception:
-        logger.warning("Qwen frame selection failed; using local quality scoring.", exc_info=True)
-
-    valid_model_selection = (
-        len(selected_indices) == frame_count
-        and len(set(selected_indices)) == frame_count
-        and all(0 <= index < len(candidates) for index in selected_indices)
-    )
-    if valid_model_selection:
-        selected = [candidates[index] for index in sorted(selected_indices)]
-    else:
-        if selected_indices:
-            logger.warning("Qwen returned invalid frame indices: %s", selected_indices)
-        selected = select_quality_frames(candidates, frame_count)
-        if len(selected) != frame_count:
-            logger.warning("Local quality selection failed; using timeline fallbacks.")
-            return []
+    selected = select_quality_frames(candidates, frame_count)
+    if len(selected) != frame_count:
+        logger.warning("Local quality selection failed; using timeline fallbacks.")
+        return []
 
     output_dir = frame_dir / "selected"
     _reset_dir(output_dir)
@@ -384,7 +375,7 @@ def extract_frames(
     frame_dir: Path,
     max_frames: int = DEFAULT_MAX_FRAMES,
     width: int = 896,
-    selector: Callable[[list[Path]], list[int]] | None = None,
+    sampling_fps: float = DEFAULT_CANDIDATE_FPS,
 ) -> list[Path]:
     frame_dir.mkdir(parents=True, exist_ok=True)
 
@@ -392,16 +383,11 @@ def extract_frames(
     duration = probe_duration_seconds(video_path)
     effective_max = compute_dynamic_frame_count(duration, max_frames)
 
-    if selector is not None:
-        model_selected_frames = _extract_model_selected_frames(
-            video_path,
-            frame_dir / "qwen_selected",
-            effective_max,
-            width,
-            selector,
-        )
-        if len(model_selected_frames) == effective_max:
-            return model_selected_frames
+    locally_selected_frames = _extract_locally_selected_frames(
+        video_path, frame_dir / "local_selected", effective_max, width, sampling_fps
+    )
+    if len(locally_selected_frames) == effective_max:
+        return locally_selected_frames
 
     anchor_frames = _extract_anchor_frames(video_path, frame_dir / "anchor", effective_max, width)
     if len(anchor_frames) == effective_max:

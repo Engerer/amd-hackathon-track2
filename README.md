@@ -30,9 +30,8 @@ up to two video tasks concurrently
  -> video URL
  -> download video
  -> ffprobe checks duration
- -> ffmpeg extracts 25 chronological candidate frames across the full clip
- -> one Qwen 3.7 Plus vision call selects the best frame from each temporal third
- -> if Qwen fails, local sharpness/exposure/contrast/diversity scoring selects the three frames
+ -> ffmpeg samples chronological candidates at 2 FPS across the full clip
+ -> local sharpness/exposure/contrast/diversity scoring selects one frame per temporal third
  -> resize each frame to 896px width
  -> four Kimi K2.6 calls run in parallel, one for each requested style
  -> every Kimi call receives the same three frames plus its own style system prompt
@@ -40,12 +39,11 @@ up to two video tasks concurrently
  -> Docker writes /output/results.json
 ```
 
-Each style is grounded directly in the same three Qwen-selected visual samples. There is no audio processing, transcript, judge call, or repair call.
+Each style is grounded directly in the same three locally selected visual samples. There is no audio processing, transcript, judge call, or repair call.
 
 The harness preserves input ordering even when the two video workers finish out of
-order. One 540-second runtime budget is shared across all tasks: above 60 seconds it
-uses Qwen and Kimi normally, from 30-60 seconds it skips Qwen in favor of local frame
-quality selection, and below 30 seconds it emits conservative style-specific
+order. One 540-second runtime budget is shared across all tasks. Below 30 seconds
+it emits conservative style-specific
 fallbacks. This leaves the final minute of the evaluator's 10-minute limit for
 startup, last-resort output completion, and writing valid JSON.
 
@@ -53,13 +51,11 @@ startup, last-resort output completion, and writing valid JSON.
 
 - Vision model: `accounts/fireworks/models/kimi-k2p6`
 - Caption model: `accounts/fireworks/models/kimi-k2p6`
-- Frame selector: `accounts/fireworks/models/qwen3p7-plus`
-- Frame sampling: Qwen selects three representatives from 25 chronological candidates
-- Frame-selection fallback: local quality and perceptual-diversity scoring, then timeline anchors
+- Frame sampling: FFmpeg extracts candidates at `2 FPS`
+- Frame selector: local quality and perceptual-diversity scoring, then timeline anchors
 - Frame cap: `3` total frames per video
 - Frame width: `896px`
-- Reasoning: enabled at `medium` effort for Qwen and Kimi
-- Selector completion budget: `4000` tokens, including reasoning
+- Reasoning: enabled at `medium` effort for Kimi
 - Caption completion budget: `4000` tokens, including reasoning
 - Concurrent video tasks: `2` (each retains four parallel style calls)
 - Global processing budget: `540` seconds
@@ -68,12 +64,11 @@ startup, last-resort output completion, and writing valid JSON.
 - Internal judge checks: off by default
 - Fireworks key: stored in a Cloudflare Worker secret, not in the repo
 
-Important: Qwen sees all 25 candidates once. Each of the four parallel Kimi calls then receives exactly the same three selected images, while its system prompt contains the rules for only one target style.
+Important: FFmpeg produces 60-240 candidates for the allowed 30-120 second clips. Selection stays local, and each of the four parallel Kimi calls receives only the same three selected images.
 
 Important: medium reasoning requires the checked-in Cloudflare Worker configuration
-with `MAX_TOKENS = 4000`. The Worker also forwards `response_format`, which Qwen uses
-for its structured frame selection. Redeploying an older 1,000-token Worker can
-silently exhaust the reasoning budget and break both Qwen and Kimi output.
+with `MAX_TOKENS = 4000`. Redeploying an older 1,000-token Worker can silently
+exhaust the reasoning budget and break Kimi output.
 
 The retired eight-video judging set and a repeatable five-point scoring rubric are in [`benchmarks/`](benchmarks/README.md). Use that set to compare prompt and frame-selection revisions across all 32 clip/style combinations.
 

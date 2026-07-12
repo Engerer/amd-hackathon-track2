@@ -15,7 +15,7 @@ Track 2 Docker container
 The Fireworks API key is stored as a Cloudflare Worker secret, not in GitHub or Docker.
 
 The checked-in Worker allows up to 4,000 completion tokens and forwards
-`response_format` for Qwen structured output. Medium reasoning for Qwen and Kimi
+`response_format` for structured output. Medium reasoning for Kimi
 requires this 4,000-token Worker configuration; redeploy this source rather than an
 older 1,000-token version or reasoning may consume the caption/JSON budget.
 

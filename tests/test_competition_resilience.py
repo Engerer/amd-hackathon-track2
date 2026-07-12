@@ -18,7 +18,6 @@ from track2_captioner.caption_pipeline import CaptionPipeline, FALLBACK_CAPTIONS
 from track2_captioner.config import Settings
 from track2_captioner.fireworks_client import FireworksClient, RetryableHTTPError
 from track2_captioner.harness import DEFAULT_STYLES, run_harness
-from track2_captioner.video_ingest import _extract_model_selected_frames
 
 
 class SelectorClient:
@@ -55,67 +54,6 @@ def make_frames(directory: Path, count: int) -> list[Path]:
 
 
 class CompetitionResilienceTests(unittest.TestCase):
-    def test_qwen_recovers_json_object_embedded_in_surrounding_text(self) -> None:
-        with tempfile.TemporaryDirectory() as name:
-            directory = Path(name)
-            pipeline = make_pipeline(
-                directory,
-                SelectorClient('Reasoning omitted. {"selected_indices": [2, 14, 24]} Done.'),
-            )
-            selected = pipeline._select_frame_indices(make_frames(directory, 25))
-        self.assertEqual(selected, [1, 13, 23])
-
-    def test_qwen_timeout_uses_local_quality_fallback(self) -> None:
-        with tempfile.TemporaryDirectory() as name:
-            directory = Path(name)
-            candidates = make_frames(directory, 25)
-            quality = [candidates[1], candidates[12], candidates[23]]
-            with (
-                patch(
-                    "track2_captioner.video_ingest._extract_candidate_frames",
-                    return_value=candidates,
-                ),
-                patch(
-                    "track2_captioner.video_ingest.select_quality_frames",
-                    return_value=quality,
-                ) as quality_mock,
-            ):
-                selected = _extract_model_selected_frames(
-                    Path("video.mp4"),
-                    directory / "selection",
-                    3,
-                    896,
-                    lambda _frames: (_ for _ in ()).throw(TimeoutError("Qwen timed out")),
-                )
-        self.assertEqual(len(selected), 3)
-        quality_mock.assert_called_once_with(candidates, 3)
-
-    def test_qwen_malformed_json_uses_local_quality_fallback(self) -> None:
-        with tempfile.TemporaryDirectory() as name:
-            directory = Path(name)
-            candidates = make_frames(directory, 25)
-            quality = [candidates[3], candidates[13], candidates[22]]
-            pipeline = make_pipeline(directory, SelectorClient("selected_indices: 4, 14, 23"))
-            with (
-                patch(
-                    "track2_captioner.video_ingest._extract_candidate_frames",
-                    return_value=candidates,
-                ),
-                patch(
-                    "track2_captioner.video_ingest.select_quality_frames",
-                    return_value=quality,
-                ) as quality_mock,
-            ):
-                selected = _extract_model_selected_frames(
-                    Path("video.mp4"),
-                    directory / "selection",
-                    3,
-                    896,
-                    pipeline._select_frame_indices,
-                )
-        self.assertEqual(len(selected), 3)
-        quality_mock.assert_called_once_with(candidates, 3)
-
     def test_one_failed_kimi_style_retries_then_falls_back_only_that_style(self) -> None:
         class RetryingClient(FireworksClient):
             def __init__(self) -> None:
