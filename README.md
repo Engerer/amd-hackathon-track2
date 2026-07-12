@@ -26,7 +26,8 @@ https://github.com/nish0203/amd-track2-captioner
 The pipeline sends exactly three silent representative frames covering the beginning, middle, and end of each clip.
 
 ```text
-video URL
+up to two video tasks concurrently
+ -> video URL
  -> download video
  -> ffprobe checks duration
  -> ffmpeg extracts 25 chronological candidate frames across the full clip
@@ -41,6 +42,13 @@ video URL
 
 Each style is grounded directly in the same three Qwen-selected visual samples. There is no audio processing, transcript, judge call, or repair call.
 
+The harness preserves input ordering even when the two video workers finish out of
+order. One 540-second runtime budget is shared across all tasks: above 60 seconds it
+uses Qwen and Kimi normally, from 30-60 seconds it skips Qwen in favor of local frame
+quality selection, and below 30 seconds it emits conservative style-specific
+fallbacks. This leaves the final minute of the evaluator's 10-minute limit for
+startup, last-resort output completion, and writing valid JSON.
+
 ## Defaults
 
 - Vision model: `accounts/fireworks/models/kimi-k2p6`
@@ -53,11 +61,19 @@ Each style is grounded directly in the same three Qwen-selected visual samples. 
 - Reasoning: enabled at `medium` effort for Qwen and Kimi
 - Selector completion budget: `4000` tokens, including reasoning
 - Caption completion budget: `4000` tokens, including reasoning
+- Concurrent video tasks: `2` (each retains four parallel style calls)
+- Global processing budget: `540` seconds
+- Model attempts: `2` total; retry only 429, 500/502/503/504, reset connections, and deadline-safe timeouts
 - Audio/transcription: disabled and not installed
 - Internal judge checks: off by default
 - Fireworks key: stored in a Cloudflare Worker secret, not in the repo
 
 Important: Qwen sees all 25 candidates once. Each of the four parallel Kimi calls then receives exactly the same three selected images, while its system prompt contains the rules for only one target style.
+
+Important: medium reasoning requires the checked-in Cloudflare Worker configuration
+with `MAX_TOKENS = 4000`. The Worker also forwards `response_format`, which Qwen uses
+for its structured frame selection. Redeploying an older 1,000-token Worker can
+silently exhaust the reasoning budget and break both Qwen and Kimi output.
 
 The retired eight-video judging set and a repeatable five-point scoring rubric are in [`benchmarks/`](benchmarks/README.md). Use that set to compare prompt and frame-selection revisions across all 32 clip/style combinations.
 
@@ -203,8 +219,11 @@ Useful variables:
 
 ```text
 TRACK2_MAX_FRAMES=3
+TRACK2_TASK_WORKERS=2
+TRACK2_RUNTIME_BUDGET_SECONDS=540
 TRACK2_DRY_RUN=true
 RUN_CHECKS=true
+FIREWORKS_MAX_ATTEMPTS=2
 MODEL_PROXY_URL=https://track2-fireworks-proxy.proxide-track2.workers.dev
 FIREWORKS_MODEL=accounts/fireworks/models/kimi-k2p6
 FIREWORKS_CAPTION_MODEL=accounts/fireworks/models/kimi-k2p6
@@ -215,6 +234,9 @@ Recommended final settings:
 ```text
 RUN_CHECKS=false
 TRACK2_MAX_FRAMES=3
+TRACK2_TASK_WORKERS=2
+TRACK2_RUNTIME_BUDGET_SECONDS=540
+FIREWORKS_MAX_ATTEMPTS=2
 ```
 
 ## Prompt Tuning

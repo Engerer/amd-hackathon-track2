@@ -28,7 +28,9 @@ class Settings:
     selector_max_tokens: int = 4000
     check_max_tokens: int = 180
     reasoning_effort: str = "medium"
-    max_retries: int = 1
+    max_attempts: int = 2
+    task_workers: int = 2
+    runtime_budget_seconds: float = 540.0
 
 
 def load_settings() -> Settings:
@@ -67,5 +69,10 @@ def load_settings() -> Settings:
         selector_max_tokens=int(os.getenv("FIREWORKS_SELECTOR_MAX_TOKENS", "4000")),
         check_max_tokens=int(os.getenv("FIREWORKS_CHECK_MAX_TOKENS", "180")),
         reasoning_effort=reasoning_effort,
-        max_retries=int(os.getenv("FIREWORKS_MAX_RETRIES", "1")),
+        max_attempts=max(1, int(os.getenv("FIREWORKS_MAX_ATTEMPTS", "2"))),
+        task_workers=max(1, int(os.getenv("TRACK2_TASK_WORKERS", "2"))),
+        runtime_budget_seconds=max(
+            0.0,
+            float(os.getenv("TRACK2_RUNTIME_BUDGET_SECONDS", "540")),
+        ),
     )
