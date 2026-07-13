@@ -1,6 +1,6 @@
 # AMD ACT II Track 2: Video Captioning Agent
 
-Track 2 submission for the AMD Developer Hackathon ACT II.
+Track 2 submission for the AMD Developer Hackathon ACT II. Source: [Engerer/amd-hackathon-track2](https://github.com/Engerer/amd-hackathon-track2). Published Docker image: [`engeraaa/amd-track2-captioner:latest`](https://hub.docker.com/r/engeraaa/amd-track2-captioner).
 
 The agent captions each video in four required styles:
 
@@ -12,13 +12,20 @@ The agent captions each video in four required styles:
 Submission image:
 
 ```text
-somnuskai/amd-track2-captioner:latest
+engeraaa/amd-track2-captioner:latest
 ```
 
-GitHub repo:
+GitHub repository:
 
 ```text
-https://github.com/nish0203/amd-track2-captioner
+https://github.com/Engerer/amd-hackathon-track2
+```
+
+Pull and run the published submission image:
+
+```powershell
+docker pull engeraaa/amd-track2-captioner:latest
+docker run --rm -v "${PWD}\sample_input:/input:ro" -v "${PWD}\docker_sample_output:/output" engeraaa/amd-track2-captioner:latest
 ```
 
 ## How It Works
@@ -50,7 +57,7 @@ Each style is grounded directly in the same three Qwen-selected visual samples. 
 - Frame-selection fallback: local quality and perceptual-diversity scoring, then timeline anchors
 - Frame cap: `3` total frames per video
 - Frame width: `896px`
-- Reasoning: disabled for Qwen and Kimi
+- Reasoning: enabled (`medium`) for Kimi only; disabled for Qwen and all other models
 - Selector completion budget: `300` tokens
 - Caption completion budget: `180` tokens
 - Audio/transcription: disabled and not installed
@@ -66,8 +73,8 @@ The retired eight-video judging set and a repeatable five-point scoring rubric a
 Clone the repo:
 
 ```powershell
-git clone https://github.com/nish0203/amd-track2-captioner.git
-cd amd-track2-captioner
+git clone https://github.com/Engerer/amd-hackathon-track2
+cd amd-hackathon-track2
 ```
 
 Create the Python environment:
@@ -145,14 +152,14 @@ docker run --rm -v "${PWD}\sample_input:/input:ro" -v "${PWD}\docker_sample_outp
 Push final image:
 
 ```powershell
-docker tag amd-track2-captioner:local somnuskai/amd-track2-captioner:latest
-docker push somnuskai/amd-track2-captioner:latest
+docker tag amd-track2-captioner:local engeraaa/amd-track2-captioner:latest
+docker push engeraaa/amd-track2-captioner:latest
 ```
 
 Public submission image:
 
 ```text
-somnuskai/amd-track2-captioner:latest
+engeraaa/amd-track2-captioner:latest
 ```
 
 ## Hackathon I/O Contract
